@@ -1,0 +1,5 @@
+# build output and the local game home folder (q3config, screenshots, logs)
+/run/
+/ioq3/build/
+__pycache__/
+*.pyc

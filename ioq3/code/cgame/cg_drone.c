@@ -1,0 +1,504 @@
+/*
+===========================================================================
+fpvq3 - FPV quadcopter flight for ioquake3
+
+This file is part of a Quake III Arena modification and is distributed
+under the GNU General Public License version 2 or later, like the rest of
+the ioquake3 game source it builds on.
+===========================================================================
+*/
+//
+// cg_drone.c -- FPV camera, OSD and drone rendering
+//
+
+#include "cg_local.h"
+
+static droneParams_t	cg_droneServer;		// physics from serverinfo
+static droneParams_t	cg_droneRates;		// rates from our dr_rates cvar
+static droneParams_t	cg_droneCombined;
+static int				cg_droneRatesModCount = -1;
+
+static int				cg_droneArmTime;
+static int				cg_droneLastFlags;
+static int				cg_droneCamShowTime = -100000;	// when the camera angle last changed
+
+/*
+=================
+CG_DroneCamUp_f / CG_DroneCamDown_f
+
+Step the FPV camera uptilt by dr_camstep degrees, 0..80.
+=================
+*/
+static void CG_DroneCamStep( float dir ) {
+	float step = dr_camstep.value > 0 ? dr_camstep.value : 5.0f;
+	float a = dr_camangle.value + dir * step;
+
+	if ( a < 0 ) {
+		a = 0;
+	} else if ( a > 80 ) {
+		a = 80;
+	}
+	trap_Cvar_Set( "dr_camangle", va( "%i", (int)( a + 0.5f ) ) );
+	trap_Cvar_Update( &dr_camangle );
+	cg_droneCamShowTime = cg.time;
+}
+
+void CG_DroneCamUp_f( void ) {
+	CG_DroneCamStep( 1 );
+}
+
+void CG_DroneCamDown_f( void ) {
+	CG_DroneCamStep( -1 );
+}
+
+/*
+=================
+CG_DroneRegisterMedia
+=================
+*/
+void CG_DroneRegisterMedia( void ) {
+	cgs.media.droneSolidShader = trap_R_RegisterShader( "fpvq3/drone_solid" );
+	cgs.media.dronePropShader = trap_R_RegisterShader( "fpvq3/drone_prop" );
+}
+
+/*
+=================
+CG_DroneParseServerinfo
+
+Read the server's dr_* physics values. Missing keys keep defaults so a
+plain server still predicts sensibly.
+=================
+*/
+static void CG_DroneInfoFloat( const char *info, const char *key, float *out ) {
+	const char *v = Info_ValueForKey( info, key );
+
+	if ( v[0] ) {
+		*out = atof( v );
+	}
+}
+
+void CG_DroneParseServerinfo( const char *info ) {
+	BG_DroneDefaults( &cg_droneServer );
+	CG_DroneInfoFloat( info, "dr_scale", &cg_droneServer.scale );
+	CG_DroneInfoFloat( info, "dr_gravity", &cg_droneServer.gravity );
+	CG_DroneInfoFloat( info, "dr_twr", &cg_droneServer.twr );
+	CG_DroneInfoFloat( info, "dr_dragside", &cg_droneServer.dragSide );
+	CG_DroneInfoFloat( info, "dr_dragtop", &cg_droneServer.dragTop );
+	CG_DroneInfoFloat( info, "dr_propspeed", &cg_droneServer.propSpeed );
+	CG_DroneInfoFloat( info, "dr_motortau", &cg_droneServer.motorTau );
+	CG_DroneInfoFloat( info, "dr_ratetau", &cg_droneServer.rateTau );
+	CG_DroneInfoFloat( info, "dr_idle", &cg_droneServer.idle );
+	CG_DroneInfoFloat( info, "dr_crash", &cg_droneServer.crashSpeed );
+	CG_DroneInfoFloat( info, "dr_bounce", &cg_droneServer.bounce );
+	CG_DroneInfoFloat( info, "dr_friction", &cg_droneServer.friction );
+	BG_DroneSanitize( &cg_droneServer );
+}
+
+/*
+=================
+CG_DroneParams
+
+Combined parameters for prediction; must match G_DroneParams on the server.
+=================
+*/
+const droneParams_t *CG_DroneParams( void ) {
+	int i;
+
+	if ( dr_rates.modificationCount != cg_droneRatesModCount ) {
+		cg_droneRatesModCount = dr_rates.modificationCount;
+		BG_DroneDefaults( &cg_droneRates );
+		BG_DroneParseRates( dr_rates.string, &cg_droneRates );
+	}
+
+	cg_droneCombined = cg_droneServer;
+	for ( i = 0; i < 3; i++ ) {
+		cg_droneCombined.rcRate[i] = cg_droneRates.rcRate[i];
+		cg_droneCombined.superRate[i] = cg_droneRates.superRate[i];
+		cg_droneCombined.expo[i] = cg_droneRates.expo[i];
+	}
+	return &cg_droneCombined;
+}
+
+/*
+=================
+CG_DroneDebug
+
+dr_debug 1 prints the snapshot and predicted state twice a second.
+A non-finite view is always reported once.
+=================
+*/
+static qboolean CG_DroneVecOK( const vec3_t v ) {
+	return v[0] == v[0] && v[1] == v[1] && v[2] == v[2]
+		&& fabs( v[0] ) < 1e6f && fabs( v[1] ) < 1e6f && fabs( v[2] ) < 1e6f;
+}
+
+void CG_DroneDebug( void ) {
+	static int nextPrint, badReported;
+	const playerState_t *sp = &cg.snap->ps, *pp = &cg.predictedPlayerState;
+	qboolean bad;
+
+	bad = !CG_DroneVecOK( cg.refdef.vieworg ) || !CG_DroneVecOK( cg.refdef.viewaxis[0] )
+		|| !CG_DroneVecOK( cg.refdef.viewaxis[2] ) || !CG_DroneVecOK( pp->viewangles );
+	if ( bad && !badReported ) {
+		badReported = 1;
+		CG_Printf( "^3fpvq3: bad view state, reporting below\n" );
+	}
+	if ( !( dr_debug.integer || ( bad && badReported == 1 ) ) || cg.time < nextPrint ) {
+		return;
+	}
+	if ( bad ) {
+		badReported = 2;
+	}
+	nextPrint = cg.time + 500;
+	CG_Printf( "dr t%i snap%i ct%i/%i org(%.1f %.1f %.1f) ang(%.1f %.1f %.1f) vel(%.1f %.1f %.1f) fl%i\n",
+		cg.time, cg.snap->serverTime, sp->commandTime, pp->commandTime,
+		pp->origin[0], pp->origin[1], pp->origin[2],
+		pp->viewangles[0], pp->viewangles[1], pp->viewangles[2],
+		pp->velocity[0], pp->velocity[1], pp->velocity[2], pp->stats[STAT_DRONE_FLAGS] );
+	CG_Printf( "   snaporg(%.1f %.1f %.1f) snapang(%.1f %.1f %.1f) err(%.1f %.1f %.1f) vieworg(%.1f %.1f %.1f) rdflags%i hyper%i\n",
+		sp->origin[0], sp->origin[1], sp->origin[2],
+		sp->viewangles[0], sp->viewangles[1], sp->viewangles[2],
+		cg.predictedError[0], cg.predictedError[1], cg.predictedError[2],
+		cg.refdef.vieworg[0], cg.refdef.vieworg[1], cg.refdef.vieworg[2], cg.refdef.rdflags, cg.hyperspace );
+}
+
+/*
+=================
+CG_IsDroneView
+=================
+*/
+qboolean CG_IsDroneView( const playerState_t *ps ) {
+	if ( ps->pm_type == PM_DRONE ) {
+		return qtrue;
+	}
+	return ps->pm_type == PM_DEAD && ( ps->generic1 & DRONE_ENT_FLAG );
+}
+
+/*
+=================
+CG_DroneView
+
+Set up the FPV camera: fixed uptilt relative to the frame, full roll.
+cg.refdef.vieworg already holds the (error-decayed) origin.
+=================
+*/
+void CG_DroneView( const playerState_t *ps ) {
+	vec3_t	body[3], cam[3];
+	float	tilt, c, s;
+	int		i;
+
+	AnglesToAxis( ps->viewangles, body );
+
+	tilt = DEG2RAD( dr_camangle.value );
+	c = cos( tilt );
+	s = sin( tilt );
+	for ( i = 0; i < 3; i++ ) {
+		cam[0][i] = body[0][i] * c + body[2][i] * s;
+		cam[1][i] = body[1][i];
+		cam[2][i] = body[2][i] * c - body[0][i] * s;
+	}
+
+	if ( cg.renderingThirdPerson ) {
+		// simple chase camera behind the drone's heading
+		vec3_t	flat, want, dir, angles;
+		vec3_t	mins = { -4, -4, -4 }, maxs = { 4, 4, 4 };
+		trace_t	tr;
+		vec3_t	target;
+
+		VectorCopy( cg.refdef.vieworg, target );
+		VectorSet( flat, body[0][0], body[0][1], 0 );
+		if ( VectorNormalize( flat ) < 0.2f ) {
+			VectorSet( flat, body[2][0], body[2][1], 0 );
+			VectorNormalize( flat );
+		}
+		VectorMA( target, -cg_thirdPersonRange.value * 0.5f, flat, want );
+		want[2] += 16;
+		CG_Trace( &tr, target, mins, maxs, want, ps->clientNum, MASK_SOLID );
+		VectorCopy( tr.endpos, cg.refdef.vieworg );
+
+		VectorSubtract( target, cg.refdef.vieworg, dir );
+		vectoangles( dir, angles );
+		AnglesToAxis( angles, cg.refdef.viewaxis );
+		VectorCopy( angles, cg.refdefViewAngles );
+		return;
+	}
+
+	// camera sits at the nose
+	VectorMA( cg.refdef.vieworg, 1.5f, body[0], cg.refdef.vieworg );
+	AxisCopy( cam, cg.refdef.viewaxis );
+	BG_DroneAxisToAngles( cam, cg.refdefViewAngles );
+}
+
+/*
+===============================================================================
+
+DRONE MODEL
+
+Built from polys at runtime so the mod needs no model assets.
+
+===============================================================================
+*/
+
+static vec3_t	drone_lightDir = { 0.35f, 0.25f, 0.9f };
+
+typedef struct {
+	vec3_t	origin;
+	vec3_t	axis[3];
+} droneFrame_t;
+
+static void CG_DronePoint( const droneFrame_t *f, const vec3_t local, vec3_t out ) {
+	VectorCopy( f->origin, out );
+	VectorMA( out, local[0], f->axis[0], out );
+	VectorMA( out, local[1], f->axis[1], out );
+	VectorMA( out, local[2], f->axis[2], out );
+}
+
+static void CG_DroneQuad( qhandle_t shader, vec3_t p[4], const vec4_t color ) {
+	polyVert_t	verts[4];
+	vec3_t		e1, e2, n, l;
+	float		shade;
+	int			i;
+
+	VectorSubtract( p[1], p[0], e1 );
+	VectorSubtract( p[2], p[0], e2 );
+	CrossProduct( e1, e2, n );
+	VectorNormalize( n );
+	VectorCopy( drone_lightDir, l );
+	VectorNormalize( l );
+	shade = 0.5f + 0.5f * fabs( DotProduct( n, l ) );
+
+	for ( i = 0; i < 4; i++ ) {
+		VectorCopy( p[i], verts[i].xyz );
+		verts[i].st[0] = ( i == 1 || i == 2 ) ? 1 : 0;
+		verts[i].st[1] = ( i >= 2 ) ? 1 : 0;
+		verts[i].modulate[0] = (byte)( 255 * color[0] * shade );
+		verts[i].modulate[1] = (byte)( 255 * color[1] * shade );
+		verts[i].modulate[2] = (byte)( 255 * color[2] * shade );
+		verts[i].modulate[3] = (byte)( 255 * color[3] );
+	}
+	trap_R_AddPolyToScene( shader, 4, verts );
+}
+
+// box in drone-local space: centre c, local axes u/v/w scaled to half extents
+static void CG_DroneBox( const droneFrame_t *f, const vec3_t c, const vec3_t u, const vec3_t v,
+						 const vec3_t w, const vec4_t color ) {
+	static const int faces[6][4] = {
+		{ 0, 1, 3, 2 }, { 4, 6, 7, 5 },		// -u, +u
+		{ 0, 4, 5, 1 }, { 2, 3, 7, 6 },		// -v, +v
+		{ 0, 2, 6, 4 }, { 1, 5, 7, 3 }		// -w, +w
+	};
+	vec3_t	corner[8], local, quad[4];
+	int		i, j;
+
+	for ( i = 0; i < 8; i++ ) {
+		VectorCopy( c, local );
+		VectorMA( local, ( i & 4 ) ? 1 : -1, u, local );
+		VectorMA( local, ( i & 2 ) ? 1 : -1, v, local );
+		VectorMA( local, ( i & 1 ) ? 1 : -1, w, local );
+		CG_DronePoint( f, local, corner[i] );
+	}
+	for ( i = 0; i < 6; i++ ) {
+		for ( j = 0; j < 4; j++ ) {
+			VectorCopy( corner[faces[i][j]], quad[j] );
+		}
+		CG_DroneQuad( cgs.media.droneSolidShader, quad, color );
+	}
+}
+
+static void CG_DroneAABox( const droneFrame_t *f, float cx, float cy, float cz,
+						   float hx, float hy, float hz, const vec4_t color ) {
+	vec3_t c, u, v, w;
+
+	VectorSet( c, cx, cy, cz );
+	VectorSet( u, hx, 0, 0 );
+	VectorSet( v, 0, hy, 0 );
+	VectorSet( w, 0, 0, hz );
+	CG_DroneBox( f, c, u, v, w, color );
+}
+
+static void CG_DroneDisc( const droneFrame_t *f, const vec3_t centre, float radius, const vec4_t color ) {
+	polyVert_t	verts[16];
+	vec3_t		local;
+	float		a;
+	int			i;
+
+	for ( i = 0; i < 16; i++ ) {
+		a = i * ( 2.0f * M_PI / 16.0f );
+		VectorSet( local, centre[0] + cos( a ) * radius, centre[1] + sin( a ) * radius, centre[2] );
+		CG_DronePoint( f, local, verts[i].xyz );
+		verts[i].st[0] = 0.5f + 0.5f * cos( a );
+		verts[i].st[1] = 0.5f + 0.5f * sin( a );
+		verts[i].modulate[0] = (byte)( 255 * color[0] );
+		verts[i].modulate[1] = (byte)( 255 * color[1] );
+		verts[i].modulate[2] = (byte)( 255 * color[2] );
+		verts[i].modulate[3] = (byte)( 255 * color[3] );
+	}
+	trap_R_AddPolyToScene( cgs.media.dronePropShader, 16, verts );
+}
+
+/*
+=================
+CG_DroneEntity
+
+Draw a player that is flying a drone.
+=================
+*/
+void CG_DroneEntity( centity_t *cent ) {
+	static const vec4_t frameColor = { 0.12f, 0.12f, 0.13f, 1.0f };
+	static const vec4_t motorColor = { 0.35f, 0.35f, 0.38f, 1.0f };
+	static const vec4_t camColor = { 1.0f, 0.45f, 0.1f, 1.0f };
+	droneFrame_t	f;
+	vec4_t			accent, propColor;
+	clientInfo_t	*ci;
+	vec3_t			c, u, v, w;
+	float			motor, spin, a;
+	int				i, clientNum;
+
+	clientNum = cent->currentState.clientNum;
+	if ( clientNum == cg.snap->ps.clientNum && !cg.renderingThirdPerson ) {
+		return;		// we are looking out of its camera
+	}
+
+	VectorCopy( cent->lerpOrigin, f.origin );
+	AnglesToAxis( cent->lerpAngles, f.axis );
+
+	ci = &cgs.clientinfo[clientNum];
+	VectorCopy( ci->color1, accent );
+	accent[3] = 1.0f;
+	if ( VectorLength( accent ) < 0.1f ) {
+		VectorSet( accent, 0.2f, 0.8f, 1.0f );
+	}
+
+	motor = ( cent->currentState.generic1 & DRONE_ENT_MOTORMASK ) / (float)DRONE_ENT_MOTORMASK;
+
+	// centre stack and top plate
+	CG_DroneAABox( &f, 0, 0, 0, 1.6f, 0.9f, 0.25f, frameColor );
+	CG_DroneAABox( &f, -0.1f, 0, 0.55f, 1.0f, 0.65f, 0.3f, accent );
+	// FPV camera at the nose
+	CG_DroneAABox( &f, 1.35f, 0, 0.45f, 0.25f, 0.35f, 0.3f, camColor );
+
+	for ( i = 0; i < 4; i++ ) {
+		float sx = ( i & 1 ) ? 1.0f : -1.0f;
+		float sy = ( i & 2 ) ? 1.0f : -1.0f;
+
+		// arm from centre to motor
+		VectorSet( c, sx * 1.25f, sy * 1.25f, 0 );
+		VectorSet( u, sx * 1.25f, sy * 1.25f, 0 );
+		VectorSet( v, -sy * 0.25f, sx * 0.25f, 0 );
+		VectorSet( w, 0, 0, 0.12f );
+		CG_DroneBox( &f, c, u, v, w, frameColor );
+
+		// motor bell
+		CG_DroneAABox( &f, sx * 2.5f, sy * 2.5f, 0.3f, 0.35f, 0.35f, 0.3f, motorColor );
+
+		// prop: translucent disc when spinning, two blades when stopped
+		VectorSet( c, sx * 2.5f, sy * 2.5f, 0.68f );
+		if ( motor > 0.01f ) {
+			propColor[0] = propColor[1] = propColor[2] = 0.75f;
+			propColor[3] = 0.15f + 0.25f * motor;
+			CG_DroneDisc( &f, c, 1.9f, propColor );
+		} else {
+			a = DEG2RAD( 30.0f + i * 47.0f );
+			spin = 1.8f;
+			VectorSet( u, cos( a ) * spin, sin( a ) * spin, 0 );
+			VectorSet( v, -sin( a ) * 0.2f, cos( a ) * 0.2f, 0 );
+			VectorSet( w, 0, 0, 0.03f );
+			CG_DroneBox( &f, c, u, v, w, accent );
+		}
+	}
+}
+
+/*
+===============================================================================
+
+OSD
+
+===============================================================================
+*/
+
+static void CG_DroneStickBox( float x, float y, float size, float sx, float sy ) {
+	static const vec4_t frame = { 1, 1, 1, 0.5f };
+	static const vec4_t dot = { 1, 1, 1, 0.9f };
+	float half = size * 0.5f;
+
+	if ( sx > 1 ) sx = 1; else if ( sx < -1 ) sx = -1;
+	if ( sy > 1 ) sy = 1; else if ( sy < -1 ) sy = -1;
+
+	CG_DrawRect( x, y, size, size, 1, frame );
+	CG_FillRect( x + half + sx * half - 2, y + half - sy * half - 2, 4, 4, dot );
+}
+
+static void CG_DroneCenterText( int y, const char *s, const vec4_t color ) {
+	int w = CG_DrawStrlen( s ) * BIGCHAR_WIDTH;
+
+	CG_DrawBigStringColor( 320 - w / 2, y, s, (float *)color );
+}
+
+/*
+=================
+CG_DroneDraw2D
+=================
+*/
+void CG_DroneDraw2D( void ) {
+	static const vec4_t white = { 1, 1, 1, 1 };
+	static const vec4_t bad = { 1, 0.3f, 0.25f, 1 };
+	playerState_t	*ps = &cg.predictedPlayerState;
+	usercmd_t		cmd, prev;
+	int				flags, current, secs, dtMs;
+	float			throttle, speed, yaw;
+	const char		*s;
+
+	if ( ps->pm_type != PM_DRONE || !dr_osd.integer ) {
+		return;
+	}
+
+	flags = ps->stats[STAT_DRONE_FLAGS];
+	if ( ( flags & DRF_ARMED ) && !( cg_droneLastFlags & DRF_ARMED ) ) {
+		cg_droneArmTime = cg.time;
+	}
+	cg_droneLastFlags = flags;
+
+	current = trap_GetCurrentCmdNumber();
+	trap_GetUserCmd( current, &cmd );
+	throttle = BG_DroneThrottle( cmd.upmove );
+
+	// status line
+	if ( flags & DRF_CRASHED ) {
+		CG_DroneCenterText( 120, "CRASHED - PRESS RESET", bad );
+	} else if ( !( flags & DRF_LIVE ) ) {
+		CG_DroneCenterText( 120, "MOVE THE STICKS TO START", white );
+	} else if ( cg.time - cg_droneArmTime < 1500 ) {
+		CG_DroneCenterText( 120, "ARMED", white );
+	}
+
+	if ( cg.time - cg_droneCamShowTime < 1500 ) {
+		CG_DroneCenterText( 150, va( "CAMERA %i DEG", dr_camangle.integer ), white );
+	}
+
+	// throttle, timer, speed
+	CG_DrawBigStringColor( 24, 400, va( "THR %3i%%", (int)( throttle * 100 + 0.5f ) ), (float *)white );
+
+	secs = ( flags & DRF_ARMED ) ? ( cg.time - cg_droneArmTime ) / 1000 : 0;
+	s = va( "%02i:%02i", secs / 60, secs % 60 );
+	CG_DrawBigStringColor( 320 - CG_DrawStrlen( s ) * BIGCHAR_WIDTH / 2, 400, s, (float *)white );
+
+	speed = VectorLength( ps->velocity ) / CG_DroneParams()->scale * 3.6f;
+	s = va( "%3i KM/H", (int)( speed + 0.5f ) );
+	CG_DrawBigStringColor( 548 - CG_DrawStrlen( s ) * BIGCHAR_WIDTH, 400, s, (float *)white );
+
+	// stick overlay: left = yaw/throttle, right = roll/pitch (mode 2)
+	if ( dr_sticks.integer ) {
+		yaw = 0;
+		trap_GetUserCmd( current - 1, &prev );
+		dtMs = cmd.serverTime - prev.serverTime;
+		if ( dtMs > 0 ) {
+			int delta = ( cmd.angles[YAW] - prev.angles[YAW] ) & 65535;
+			if ( delta > 32767 ) {
+				delta -= 65536;
+			}
+			yaw = -SHORT2ANGLE( delta ) / ( dtMs * 0.001f ) / DRONE_YAW_FULLSCALE;
+		}
+		CG_DroneStickBox( 268, 350, 44, yaw, throttle * 2 - 1 );
+		CG_DroneStickBox( 328, 350, 44, cmd.rightmove / 127.0f, cmd.forwardmove / 127.0f );
+	}
+}
