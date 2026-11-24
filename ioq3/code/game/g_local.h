@@ -625,6 +625,8 @@ void ClientCommand( int clientNum );
 //
 void ClientThink( int clientNum );
 void G_DroneParams( gclient_t *client, droneParams_t *p );
+qboolean G_IsDrone( gentity_t *ent );
+void G_DroneReset( gentity_t *ent );
 void ClientEndFrame( gentity_t *ent );
 void G_RunClient( gentity_t *ent );
 
@@ -725,6 +727,9 @@ extern	vmCvar_t	dr_idle;
 extern	vmCvar_t	dr_crash;
 extern	vmCvar_t	dr_bounce;
 extern	vmCvar_t	dr_friction;
+extern	vmCvar_t	dr_weapons;
+extern	vmCvar_t	dr_hitbox;
+extern	vmCvar_t	dr_botdebug;
 extern	vmCvar_t	g_speed;
 extern	vmCvar_t	g_knockback;
 extern	vmCvar_t	g_quadfactor;

@@ -42,6 +42,7 @@ set(GAME_SOURCES
     ${SOURCE_DIR}/game/ai_cmd.c
     ${SOURCE_DIR}/game/ai_dmnet.c
     ${SOURCE_DIR}/game/ai_dmq3.c
+    ${SOURCE_DIR}/game/ai_drone.c
     ${SOURCE_DIR}/game/ai_main.c
     ${SOURCE_DIR}/game/ai_team.c
     ${SOURCE_DIR}/game/ai_vcmd.c

@@ -43,6 +43,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../botlib/be_ai_weap.h"
 //
 #include "ai_main.h"
+#include "ai_drone.h"
 #include "ai_dmq3.h"
 #include "ai_chat.h"
 #include "ai_cmd.h"
@@ -210,7 +211,7 @@ qboolean EntityIsDead(aas_entityinfo_t *entinfo) {
 			return qfalse;
 		}
 
-		if (ps.pm_type != PM_NORMAL) return qtrue;
+		if (ps.pm_type != PM_NORMAL && ps.pm_type != PM_DRONE) return qtrue;	//fpvq3: drones are alive
 	}
 	return qfalse;
 }
@@ -1607,6 +1608,8 @@ void BotSetupForMovement(bot_state_t *bs) {
 	if (bs->walker > 0.5) initmove.or_moveflags |= MFL_WALK;
 	//
 	VectorCopy(bs->viewangles, initmove.viewangles);
+	//fpvq3: plan for a player standing under the drone
+	BotDroneSetupMovement(bs, &initmove);
 	//
 	trap_BotInitMoveState(bs->ms, &initmove);
 }
@@ -2650,7 +2653,7 @@ bot_moveresult_t BotAttackMove(bot_state_t *bs, int tfl) {
 		//initialize the movement state
 		BotSetupForMovement(bs);
 		//move towards the goal
-		trap_BotMoveToGoal(&moveresult, bs->ms, &goal, tfl);
+		BotMoveToGoalDrone(bs, &moveresult, &goal, tfl);
 		return moveresult;
 	}
 	//
@@ -3268,6 +3271,7 @@ BotAimAtEnemy
 void BotAimAtEnemy(bot_state_t *bs) {
 	int i, enemyvisible;
 	float dist, f, aim_skill, aim_accuracy, speed, reactiontime;
+	qboolean enemydrone;
 	vec3_t dir, bestorigin, end, start, groundtarget, cmdmove, enemyvelocity;
 	vec3_t mins = {-4,-4,-4}, maxs = {4, 4, 4};
 	weaponinfo_t wi;
@@ -3374,13 +3378,15 @@ void BotAimAtEnemy(bot_state_t *bs) {
 			}
 		}
 	}
+	//fpvq3: a drone is a small box around its origin that flies, not a walking player
+	enemydrone = bs->enemy >= 0 && bs->enemy < MAX_CLIENTS && G_IsDrone(&g_entities[bs->enemy]);
 	//check visibility of enemy
 	enemyvisible = BotEntityVisible(bs->entitynum, bs->eye, bs->viewangles, 360, bs->enemy);
 	//if the enemy is visible
 	if (enemyvisible) {
 		//
 		VectorCopy(entinfo.origin, bestorigin);
-		bestorigin[2] += 8;
+		if (!enemydrone) bestorigin[2] += 8;
 		//get the start point shooting from
 		//NOTE: the x and y projectile start offsets are ignored
 		VectorCopy(bs->origin, start);
@@ -3389,7 +3395,7 @@ void BotAimAtEnemy(bot_state_t *bs) {
 		//
 		BotAI_Trace(&trace, start, mins, maxs, bestorigin, bs->entitynum, MASK_SHOT);
 		//if the enemy is NOT hit
-		if (trace.fraction <= 1 && trace.ent != entinfo.number) {
+		if (trace.fraction <= 1 && trace.ent != entinfo.number && !enemydrone) {
 			bestorigin[2] += 16;
 		}
 		//if it is not an instant hit weapon the bot might want to predict the enemy
@@ -3401,7 +3407,7 @@ void BotAimAtEnemy(bot_state_t *bs) {
 			//if the enemy is NOT pretty far away and strafing just small steps left and right
 			if (!(dist > 100 && VectorLengthSquared(dir) < Square(32))) {
 				//if skilled enough do exact prediction
-				if (aim_skill > 0.8 &&
+				if (aim_skill > 0.8 && !enemydrone &&
 						//if the weapon is ready to fire
 						bs->cur_ps.weaponstate == WEAPON_READY) {
 					aas_clientmove_t move;
@@ -3427,14 +3433,14 @@ void BotAimAtEnemy(bot_state_t *bs) {
 					VectorCopy(move.endpos, bestorigin);
 					//BotAI_Print(PRT_MESSAGE, "%1.1f predicted speed = %f, frames = %f\n", FloatTime(), VectorLength(dir), dist * 10 / wi.speed);
 				}
-				//if not that skilled do linear prediction
-				else if (aim_skill > 0.4) {
+				//if not that skilled do linear prediction (fpvq3: and for flying drones)
+				else if (aim_skill > 0.4 || (enemydrone && aim_skill > 0.2)) {
 					VectorSubtract(entinfo.origin, bs->origin, dir);
 					//distance towards the enemy
 					dist = VectorLength(dir);
 					//direction the enemy is moving in
 					VectorSubtract(entinfo.origin, entinfo.lastvisorigin, dir);
-					dir[2] = 0;
+					if (!enemydrone) dir[2] = 0;	//fpvq3: drones also move vertically
 					//
 					speed = VectorNormalize(dir) / entinfo.update_time;
 					//botimport.Print(PRT_MESSAGE, "speed = %f, wi->speed = %f\n", speed, wi->speed);
@@ -3484,7 +3490,7 @@ void BotAimAtEnemy(bot_state_t *bs) {
 	else {
 		//
 		VectorCopy(bs->lastenemyorigin, bestorigin);
-		bestorigin[2] += 8;
+		if (!enemydrone) bestorigin[2] += 8;
 		//if the bot is skilled enough
 		if (aim_skill > 0.5) {
 			//do prediction shots around corners

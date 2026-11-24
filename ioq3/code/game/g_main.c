@@ -64,6 +64,9 @@ vmCvar_t	dr_idle;
 vmCvar_t	dr_crash;
 vmCvar_t	dr_bounce;
 vmCvar_t	dr_friction;
+vmCvar_t	dr_weapons;
+vmCvar_t	dr_hitbox;
+vmCvar_t	dr_botdebug;
 vmCvar_t	g_cheats;
 vmCvar_t	g_knockback;
 vmCvar_t	g_quadfactor;
@@ -168,6 +171,11 @@ static cvarTable_t		gameCvarTable[] = {
 	{ &dr_crash, "dr_crash", "0", CVAR_SERVERINFO | CVAR_ARCHIVE, 0, qfalse },
 	{ &dr_bounce, "dr_bounce", "0.3", CVAR_SERVERINFO | CVAR_ARCHIVE, 0, qfalse },
 	{ &dr_friction, "dr_friction", "0.6", CVAR_SERVERINFO | CVAR_ARCHIVE, 0, qfalse },
+	// 1 = drones carry and fire weapons; 0 = flying only (and dr_reset respawns instantly)
+	{ &dr_weapons, "dr_weapons", "1", CVAR_SERVERINFO | CVAR_ARCHIVE, 0, qfalse },
+	// half size of a drone's hit box when weapons are on; the frame itself is DRONE_HALF_SIZE
+	{ &dr_hitbox, "dr_hitbox", "12", CVAR_ARCHIVE, 0, qfalse },
+	{ &dr_botdebug, "dr_botdebug", "0", 0, 0, qfalse },
 	{ &g_knockback, "g_knockback", "1000", 0, 0, qtrue  },
 	{ &g_quadfactor, "g_quadfactor", "3", 0, 0, qtrue  },
 	{ &g_weaponRespawn, "g_weaponrespawn", "5", 0, 0, qtrue  },

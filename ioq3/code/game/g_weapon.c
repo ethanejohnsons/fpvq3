@@ -63,6 +63,25 @@ void Weapon_Gauntlet( gentity_t *ent ) {
 
 /*
 ===============
+G_AimVectors
+
+fpvq3: a drone's view angles are its attitude, so it aims along
+BG_DroneAimAngles (its FPV camera, or its view in easy mode) instead.
+===============
+*/
+static void G_AimVectors( gentity_t *ent, vec3_t f, vec3_t r, vec3_t u ) {
+	vec3_t	aim;
+
+	if ( ent->client->ps.pm_type == PM_DRONE ) {
+		BG_DroneAimAngles( &ent->client->ps, aim );
+		AngleVectors( aim, f, r, u );
+	} else {
+		AngleVectors( ent->client->ps.viewangles, f, r, u );
+	}
+}
+
+/*
+===============
 CheckGauntletAttack
 ===============
 */
@@ -74,7 +93,7 @@ qboolean CheckGauntletAttack( gentity_t *ent ) {
 	int			damage;
 
 	// set aiming directions
-	AngleVectors (ent->client->ps.viewangles, forward, right, up);
+	G_AimVectors( ent, forward, right, up );
 
 	CalcMuzzlePoint ( ent, forward, right, up, muzzle );
 
@@ -825,7 +844,7 @@ void FireWeapon( gentity_t *ent ) {
 	}
 
 	// set aiming directions
-	AngleVectors (ent->client->ps.viewangles, forward, right, up);
+	G_AimVectors( ent, forward, right, up );
 
 	CalcMuzzlePointOrigin ( ent, ent->client->oldOrigin, forward, right, up, muzzle );
 

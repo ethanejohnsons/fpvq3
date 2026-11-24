@@ -78,6 +78,8 @@ static void CG_DroneInfoFloat( const char *info, const char *key, float *out ) {
 }
 
 void CG_DroneParseServerinfo( const char *info ) {
+	const char *v;
+
 	BG_DroneDefaults( &cg_droneServer );
 	CG_DroneInfoFloat( info, "dr_scale", &cg_droneServer.scale );
 	CG_DroneInfoFloat( info, "dr_gravity", &cg_droneServer.gravity );
@@ -91,6 +93,10 @@ void CG_DroneParseServerinfo( const char *info ) {
 	CG_DroneInfoFloat( info, "dr_crash", &cg_droneServer.crashSpeed );
 	CG_DroneInfoFloat( info, "dr_bounce", &cg_droneServer.bounce );
 	CG_DroneInfoFloat( info, "dr_friction", &cg_droneServer.friction );
+	v = Info_ValueForKey( info, "dr_weapons" );
+	if ( v[0] ) {
+		cg_droneServer.weapons = atoi( v );
+	}
 	BG_DroneSanitize( &cg_droneServer );
 }
 
@@ -116,6 +122,8 @@ const droneParams_t *CG_DroneParams( void ) {
 		cg_droneCombined.superRate[i] = cg_droneRates.superRate[i];
 		cg_droneCombined.expo[i] = cg_droneRates.expo[i];
 	}
+	// same parsing as the server applies to our userinfo
+	BG_DroneParsePilot( dr_mode.string, dr_camangle.string, &cg_droneCombined );
 	return &cg_droneCombined;
 }
 
@@ -176,37 +184,70 @@ qboolean CG_IsDroneView( const playerState_t *ps ) {
 
 /*
 =================
+CG_DroneCamAngle
+
+Uptilt of the FPV camera. Our own comes from dr_camangle; for a pilot we
+are following, it is the angle between their frame and their aim, which
+in acro and level mode is their camera.
+=================
+*/
+static float CG_DroneCamAngle( const playerState_t *ps, vec3_t body[3] ) {
+	vec3_t	aim, fwd;
+
+	if ( !( ps->pm_flags & PMF_FOLLOW ) ) {
+		return dr_camangle.value;
+	}
+	BG_DroneAimAngles( ps, aim );
+	AngleVectors( aim, fwd, NULL, NULL );
+	return RAD2DEG( atan2( DotProduct( fwd, body[2] ), DotProduct( fwd, body[0] ) ) );
+}
+
+/*
+=================
 CG_DroneView
 
-Set up the FPV camera: fixed uptilt relative to the frame, full roll.
+Set up the camera. Acro and level: the FPV camera, at a fixed uptilt to
+the frame, with full roll. Easy: the view angles, like a normal player,
+since they are what the pilot aims with.
 cg.refdef.vieworg already holds the (error-decayed) origin.
 =================
 */
 void CG_DroneView( const playerState_t *ps ) {
-	vec3_t	body[3], cam[3];
+	vec3_t	body[3], cam[3], aim;
 	float	tilt, c, s;
 	int		i;
+	qboolean easy;
 
 	AnglesToAxis( ps->viewangles, body );
+	easy = ps->pm_type == PM_DRONE && BG_DroneMode( ps ) == DRONE_MODE_EASY;
 
-	tilt = DEG2RAD( dr_camangle.value );
-	c = cos( tilt );
-	s = sin( tilt );
-	for ( i = 0; i < 3; i++ ) {
-		cam[0][i] = body[0][i] * c + body[2][i] * s;
-		cam[1][i] = body[1][i];
-		cam[2][i] = body[2][i] * c - body[0][i] * s;
+	if ( easy ) {
+		BG_DroneAimAngles( ps, aim );
+		AnglesToAxis( aim, cam );
+	} else {
+		tilt = DEG2RAD( CG_DroneCamAngle( ps, body ) );
+		c = cos( tilt );
+		s = sin( tilt );
+		for ( i = 0; i < 3; i++ ) {
+			cam[0][i] = body[0][i] * c + body[2][i] * s;
+			cam[1][i] = body[1][i];
+			cam[2][i] = body[2][i] * c - body[0][i] * s;
+		}
 	}
 
 	if ( cg.renderingThirdPerson ) {
-		// simple chase camera behind the drone's heading
+		// simple chase camera behind the drone's heading (easy: behind the aim)
 		vec3_t	flat, want, dir, angles;
 		vec3_t	mins = { -4, -4, -4 }, maxs = { 4, 4, 4 };
 		trace_t	tr;
 		vec3_t	target;
 
 		VectorCopy( cg.refdef.vieworg, target );
-		VectorSet( flat, body[0][0], body[0][1], 0 );
+		if ( easy ) {
+			VectorSet( flat, cam[0][0], cam[0][1], 0 );
+		} else {
+			VectorSet( flat, body[0][0], body[0][1], 0 );
+		}
 		if ( VectorNormalize( flat ) < 0.2f ) {
 			VectorSet( flat, body[2][0], body[2][1], 0 );
 			VectorNormalize( flat );
@@ -226,7 +267,37 @@ void CG_DroneView( const playerState_t *ps ) {
 	// camera sits at the nose
 	VectorMA( cg.refdef.vieworg, 1.5f, body[0], cg.refdef.vieworg );
 	AxisCopy( cam, cg.refdef.viewaxis );
-	BG_DroneAxisToAngles( cam, cg.refdefViewAngles );
+	if ( easy ) {
+		VectorCopy( aim, cg.refdefViewAngles );
+	} else {
+		BG_DroneAxisToAngles( cam, cg.refdefViewAngles );
+	}
+}
+
+/*
+=================
+CG_DroneMuzzle
+
+Where a drone's shots start and which way they go, for weapon effects.
+Returns qfalse if cent is not a drone.
+=================
+*/
+qboolean CG_DroneMuzzle( centity_t *cent, vec3_t muzzle, vec3_t forward ) {
+	vec3_t	aim;
+
+	if ( !( cent->currentState.generic1 & DRONE_ENT_FLAG ) ) {
+		return qfalse;
+	}
+	if ( cent->currentState.number == cg.predictedPlayerState.clientNum ) {
+		BG_DroneAimAngles( &cg.predictedPlayerState, aim );
+		VectorCopy( cg.predictedPlayerState.origin, muzzle );
+	} else {
+		VectorCopy( cent->currentState.angles2, aim );
+		VectorCopy( cent->lerpOrigin, muzzle );
+	}
+	AngleVectors( aim, forward, NULL, NULL );
+	VectorMA( muzzle, 14, forward, muzzle );	// as CalcMuzzlePoint on the server
+	return qtrue;
 }
 
 /*
@@ -240,6 +311,8 @@ Built from polys at runtime so the mod needs no model assets.
 */
 
 static vec3_t	drone_lightDir = { 0.35f, 0.25f, 0.9f };
+
+#define DRONE_GUN_SCALE		0.25f	// weapon models are sized for a player's hands
 
 typedef struct {
 	vec3_t	origin;
@@ -406,6 +479,30 @@ void CG_DroneEntity( centity_t *cent ) {
 			CG_DroneBox( &f, c, u, v, w, accent );
 		}
 	}
+
+	// the gun: a shrunken weapon model slung under the frame, pointing
+	// where the shots go (CG_AddPlayerWeapon adds its flash and beam)
+	if ( CG_DroneParams()->weapons && cent->currentState.weapon > WP_NONE
+			&& !( cent->currentState.eFlags & EF_DEAD ) ) {
+		refEntity_t	gun;
+		vec3_t		aim;
+
+		memset( &gun, 0, sizeof( gun ) );
+		if ( clientNum == cg.predictedPlayerState.clientNum ) {
+			BG_DroneAimAngles( &cg.predictedPlayerState, aim );
+		} else {
+			VectorCopy( cent->currentState.angles2, aim );
+		}
+		AnglesToAxis( aim, gun.axis );
+		for ( i = 0; i < 3; i++ ) {
+			VectorScale( gun.axis[i], DRONE_GUN_SCALE, gun.axis[i] );
+		}
+		gun.nonNormalizedAxes = qtrue;
+		VectorMA( f.origin, -1.4f, f.axis[2], gun.origin );
+		VectorCopy( gun.origin, gun.lightingOrigin );
+		gun.renderfx = RF_LIGHTING_ORIGIN;
+		CG_AddPlayerWeapon( &gun, NULL, cent, ci->team );
+	}
 }
 
 /*
@@ -442,11 +539,13 @@ CG_DroneDraw2D
 void CG_DroneDraw2D( void ) {
 	static const vec4_t white = { 1, 1, 1, 1 };
 	static const vec4_t bad = { 1, 0.3f, 0.25f, 1 };
+	static const char	*modeNames[] = { "ACRO", "LEVEL", "EASY" };
 	playerState_t	*ps = &cg.predictedPlayerState;
 	usercmd_t		cmd, prev;
-	int				flags, current, secs, dtMs;
+	int				flags, current, secs, dtMs, mode;
 	float			throttle, speed, yaw;
 	const char		*s;
+	qboolean		selecting;
 
 	if ( ps->pm_type != PM_DRONE || !dr_osd.integer ) {
 		return;
@@ -461,12 +560,17 @@ void CG_DroneDraw2D( void ) {
 	current = trap_GetCurrentCmdNumber();
 	trap_GetUserCmd( current, &cmd );
 	throttle = BG_DroneThrottle( cmd.upmove );
+	mode = BG_DroneMode( ps );
+
+	// the weapon select bar (shown for 1.4 s after a change) sits where the
+	// timer and stick overlay are
+	selecting = CG_DroneParams()->weapons && cg.time - cg.weaponSelectTime < 1400;
 
 	// status line
 	if ( flags & DRF_CRASHED ) {
 		CG_DroneCenterText( 120, "CRASHED - PRESS RESET", bad );
 	} else if ( !( flags & DRF_LIVE ) ) {
-		CG_DroneCenterText( 120, "MOVE THE STICKS TO START", white );
+		CG_DroneCenterText( 120, mode == DRONE_MODE_EASY ? "MOVE OR LOOK TO START" : "MOVE THE STICKS TO START", white );
 	} else if ( cg.time - cg_droneArmTime < 1500 ) {
 		CG_DroneCenterText( 120, "ARMED", white );
 	}
@@ -475,19 +579,27 @@ void CG_DroneDraw2D( void ) {
 		CG_DroneCenterText( 150, va( "CAMERA %i DEG", dr_camangle.integer ), white );
 	}
 
-	// throttle, timer, speed
-	CG_DrawBigStringColor( 24, 400, va( "THR %3i%%", (int)( throttle * 100 + 0.5f ) ), (float *)white );
+	// mode, throttle (easy: motor output, since the stick sets a climb rate), timer, speed
+	CG_DrawSmallStringColor( 24, 382, modeNames[mode], (float *)white );
+	if ( mode == DRONE_MODE_EASY ) {
+		s = va( "PWR %3i%%", ps->stats[STAT_DRONE_MOTOR] * 100 / DRONE_MOTOR_SCALE );
+	} else {
+		s = va( "THR %3i%%", (int)( throttle * 100 + 0.5f ) );
+	}
+	CG_DrawBigStringColor( 24, 400, s, (float *)white );
 
 	secs = ( flags & DRF_ARMED ) ? ( cg.time - cg_droneArmTime ) / 1000 : 0;
 	s = va( "%02i:%02i", secs / 60, secs % 60 );
-	CG_DrawBigStringColor( 320 - CG_DrawStrlen( s ) * BIGCHAR_WIDTH / 2, 400, s, (float *)white );
+	if ( !selecting ) {
+		CG_DrawBigStringColor( 320 - CG_DrawStrlen( s ) * BIGCHAR_WIDTH / 2, 400, s, (float *)white );
+	}
 
 	speed = VectorLength( ps->velocity ) / CG_DroneParams()->scale * 3.6f;
 	s = va( "%3i KM/H", (int)( speed + 0.5f ) );
 	CG_DrawBigStringColor( 548 - CG_DrawStrlen( s ) * BIGCHAR_WIDTH, 400, s, (float *)white );
 
 	// stick overlay: left = yaw/throttle, right = roll/pitch (mode 2)
-	if ( dr_sticks.integer ) {
+	if ( dr_sticks.integer && !selecting ) {
 		yaw = 0;
 		trap_GetUserCmd( current - 1, &prev );
 		dtMs = cmd.serverTime - prev.serverTime;

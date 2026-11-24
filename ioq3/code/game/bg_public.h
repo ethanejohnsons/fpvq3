@@ -223,7 +223,9 @@ typedef enum {
 	STAT_MAX_HEALTH,				// health / armor limit, changeable by handicap
 	STAT_DRONE_FLAGS,				// fpvq3: DRF_* bits
 	STAT_DRONE_MOTOR,				// fpvq3: spooled motor output, 0..DRONE_MOTOR_SCALE
-	STAT_DRONE_YAWCMD				// fpvq3: previous usercmd yaw (short) for yaw-rate decoding
+	STAT_DRONE_YAWCMD,				// fpvq3: previous usercmd yaw (short) for yaw-rate decoding
+	STAT_DRONE_AIM_PITCH,			// fpvq3: where shots go (short angle), see BG_DroneAimAngles
+	STAT_DRONE_AIM_YAW
 } statIndex_t;
 
 
@@ -765,12 +767,22 @@ Input encoding (no engine changes, see fpv.cfg):
 	             DRONE_YAW_FULLSCALE deg/s at full stick and Pmove decodes it back
 	reset     -> +button7 (or the dr_reset command)
 
+Flight modes (dr_mode, per pilot):
+	DRONE_MODE_ACRO   sticks set body rates, throttle sets motor power
+	DRONE_MODE_LEVEL  roll/pitch sticks set a tilt angle and it levels itself
+	                  when they are released; throttle and yaw as in acro
+	DRONE_MODE_EASY   for keyboard, gamepad and bots: forwardmove/rightmove
+	                  set a horizontal velocity along the view heading, upmove
+	                  a climb rate (0 holds altitude), and the view angles
+	                  (mouse or right stick) aim, as in normal Quake
+
 State storage (all fields the engine already networks):
 	viewangles     drone attitude (pitch, yaw, roll)
 	grapplePoint   body angular velocity, deg/s (roll, pitch, yaw axes)
 	velocity       linear velocity, full float (not snapped)
-	stats[]        STAT_DRONE_FLAGS / MOTOR / YAWCMD
+	stats[]        STAT_DRONE_FLAGS / MOTOR / YAWCMD / AIM_PITCH / AIM_YAW
 	generic1       DRONE_ENT_FLAG | motor level 0..127, mirrored into entityState
+	angles2        (entityState only) aim direction, for other clients' effects
 ===================================================================================
 */
 
@@ -791,6 +803,12 @@ State storage (all fields the engine already networks):
 #define DRF_CONTACT		8	// touched something during the last move
 #define DRF_GROUNDED	16	// resting on a floor at the end of the last substep
 #define DRF_LIVE		32	// stick input seen since spawn; until then the motors stay off
+#define DRF_MODE_SHIFT	6	// two bits: the flight mode of the last move
+#define DRF_MODE_MASK	( 3 << DRF_MODE_SHIFT )
+
+#define DRONE_MODE_ACRO		0
+#define DRONE_MODE_LEVEL	1
+#define DRONE_MODE_EASY		2
 
 typedef struct droneParams_s {
 	// physics, set by the server (serverinfo)
@@ -806,6 +824,11 @@ typedef struct droneParams_s {
 	float	crashSpeed;		// impact speed (m/s) that disarms, 0 = never
 	float	bounce;			// restitution for hard impacts
 	float	friction;		// contact friction coefficient
+	int		weapons;		// 1 = drones can fire (dr_weapons)
+
+	// pilot settings, from this client (userinfo)
+	int		mode;			// DRONE_MODE_*
+	float	camAngle;		// FPV camera uptilt (deg) in acro and level, which is also the aim
 
 	// rates, from this client (Betaflight-style), index 0 roll, 1 pitch, 2 yaw
 	float	rcRate[3];
@@ -815,8 +838,11 @@ typedef struct droneParams_s {
 
 void	BG_DroneDefaults( droneParams_t *p );
 void	BG_DroneParseRates( const char *s, droneParams_t *p );
+void	BG_DroneParsePilot( const char *mode, const char *camAngle, droneParams_t *p );
 void	BG_DroneSanitize( droneParams_t *p );
 float	BG_DroneRate( const droneParams_t *p, int axis, float stick );
 void	BG_DroneAxisToAngles( vec3_t axis[3], vec3_t angles );
 float	BG_DroneThrottle( int upmove );
 void	PM_DroneMove( pmove_t *pmove, int msec );
+void	BG_DroneAimAngles( const playerState_t *ps, vec3_t angles );
+int		BG_DroneMode( const playerState_t *ps );

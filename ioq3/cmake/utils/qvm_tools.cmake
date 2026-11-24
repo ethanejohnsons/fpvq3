@@ -55,6 +55,11 @@ function(add_qvm MODULE_NAME)
         list(APPEND LCC_FLAGS "-D${DEFINITION}")
     endforeach()
 
+    # fpvq3: q3lcc can't report the headers a file includes, so rebuild on
+    # any header change. Without this a changed struct leaves stale .asm
+    # files that disagree about its layout, and the QVM corrupts memory.
+    file(GLOB QVM_HEADERS CONFIGURE_DEPENDS ${SOURCE_DIR}/*/*.h)
+
     set(ASM_FILES "")
     foreach(SOURCE ${ARG_SOURCES})
         if(${SOURCE} MATCHES "\\.asm$")
@@ -69,7 +74,7 @@ function(add_qvm MODULE_NAME)
         add_custom_command(
             OUTPUT ${ASM_FILE}
             COMMAND ${Q3LCC} ${LCC_FLAGS} -o ${ASM_FILE} ${SOURCE}
-            DEPENDS ${SOURCE} qvm_tools ${Q3RCC} ${Q3CPP} ${Q3LCC}
+            DEPENDS ${SOURCE} ${QVM_HEADERS} qvm_tools ${Q3RCC} ${Q3CPP} ${Q3LCC}
             COMMENT "Building C object ${ASM_FILE_COMMENT}")
 
         list(APPEND ASM_FILES ${ASM_FILE})

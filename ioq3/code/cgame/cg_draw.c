@@ -2554,9 +2554,14 @@ static void CG_Draw2D(stereoFrame_t stereoFrame)
 		CG_DrawCrosshairNames();
 	} else {
 		// don't draw any status if dead or the scoreboard is being explicitly shown
-		if ( !cg.showScores && cg.snap->ps.stats[STAT_HEALTH] > 0 && cg.predictedPlayerState.pm_type == PM_DRONE ) {
+		// fpvq3: drones get the OSD, plus the normal status, crosshair and
+		// weapon select when the server has weapons on
+		qboolean drone = cg.predictedPlayerState.pm_type == PM_DRONE;
+
+		if ( !cg.showScores && cg.snap->ps.stats[STAT_HEALTH] > 0 && drone ) {
 			CG_DroneDraw2D();
-		} else if ( !cg.showScores && cg.snap->ps.stats[STAT_HEALTH] > 0 ) {
+		}
+		if ( !cg.showScores && cg.snap->ps.stats[STAT_HEALTH] > 0 && ( !drone || CG_DroneParams()->weapons ) ) {
 
 #ifdef MISSIONPACK
 			if ( cg_drawStatus.integer ) {

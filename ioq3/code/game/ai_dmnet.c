@@ -42,6 +42,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../botlib/be_ai_weap.h"
 //
 #include "ai_main.h"
+#include "ai_drone.h"
 #include "ai_dmq3.h"
 #include "ai_chat.h"
 #include "ai_cmd.h"
@@ -1563,7 +1564,7 @@ int AINode_Seek_ActivateEntity(bot_state_t *bs) {
 		//initialize the movement state
 		BotSetupForMovement(bs);
 		//move towards the goal
-		trap_BotMoveToGoal(&moveresult, bs->ms, goal, bs->tfl);
+		BotMoveToGoalDrone(bs, &moveresult, goal, bs->tfl);
 		//if the movement failed
 		if (moveresult.failure) {
 			//reset the avoid reach, otherwise bot is stuck in current area
@@ -1720,7 +1721,7 @@ int AINode_Seek_NBG(bot_state_t *bs) {
 	//initialize the movement state
 	BotSetupForMovement(bs);
 	//move towards the goal
-	trap_BotMoveToGoal(&moveresult, bs->ms, &goal, bs->tfl);
+	BotMoveToGoalDrone(bs, &moveresult, &goal, bs->tfl);
 	//if the movement failed
 	if (moveresult.failure) {
 		//reset the avoid reach, otherwise bot is stuck in current area
@@ -1912,7 +1913,7 @@ int AINode_Seek_LTG(bot_state_t *bs)
 	//initialize the movement state
 	BotSetupForMovement(bs);
 	//move towards the goal
-	trap_BotMoveToGoal(&moveresult, bs->ms, &goal, bs->tfl);
+	BotMoveToGoalDrone(bs, &moveresult, &goal, bs->tfl);
 	//if the movement failed
 	if (moveresult.failure) {
 		//reset the avoid reach, otherwise bot is stuck in current area
@@ -2243,7 +2244,7 @@ int AINode_Battle_Chase(bot_state_t *bs)
 	//initialize the movement state
 	BotSetupForMovement(bs);
 	//move towards the goal
-	trap_BotMoveToGoal(&moveresult, bs->ms, &goal, bs->tfl);
+	BotMoveToGoalDrone(bs, &moveresult, &goal, bs->tfl);
 	//if the movement failed
 	if (moveresult.failure) {
 		//reset the avoid reach, otherwise bot is stuck in current area
@@ -2431,7 +2432,7 @@ int AINode_Battle_Retreat(bot_state_t *bs) {
 	//initialize the movement state
 	BotSetupForMovement(bs);
 	//move towards the goal
-	trap_BotMoveToGoal(&moveresult, bs->ms, &goal, bs->tfl);
+	BotMoveToGoalDrone(bs, &moveresult, &goal, bs->tfl);
 	//if the movement failed
 	if (moveresult.failure) {
 		//reset the avoid reach, otherwise bot is stuck in current area
@@ -2575,7 +2576,7 @@ int AINode_Battle_NBG(bot_state_t *bs) {
 	//initialize the movement state
 	BotSetupForMovement(bs);
 	//move towards the goal
-	trap_BotMoveToGoal(&moveresult, bs->ms, &goal, bs->tfl);
+	BotMoveToGoalDrone(bs, &moveresult, &goal, bs->tfl);
 	//if the movement failed
 	if (moveresult.failure) {
 		//reset the avoid reach, otherwise bot is stuck in current area

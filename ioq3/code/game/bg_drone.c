@@ -13,6 +13,8 @@ the ioquake3 game source it builds on.
 // The model is a rigid body with:
 //   - Betaflight-style rates mapping stick deflection to target body rates
 //   - a first-order rate controller (stands in for a tuned PID loop, airmode on)
+//   - optional self-levelling (level mode) and velocity / altitude hold (easy
+//     mode) on top of the rate controller, like a flight controller's angle mode
 //   - spooled motors, thrust ~ rpm^2, thrust loss with axial inflow speed
 //   - anisotropic quadratic drag in the body frame
 //   - impulse-based collisions at the box corner, so hits make it tumble
@@ -31,6 +33,31 @@ the ioquake3 game source it builds on.
 #define DRONE_BODY_Y			3.0f
 #define DRONE_BODY_Z			1.2f
 #define DRONE_INERTIA			6.5f	// moment of inertia / mass, units^2
+
+// level mode (and the attitude part of easy mode)
+#define DRONE_LEVEL_ANGLE		55.0f	// tilt at full roll/pitch stick, deg
+#define DRONE_LEVEL_GAIN		10.0f	// attitude error (rad) to body rate (rad/s)
+#define DRONE_LEVEL_MAXRATE		10.0f	// cap on the self-levelling rate, rad/s
+
+// easy mode
+#define DRONE_EASY_SPEED		14.0f	// horizontal speed at full stick, m/s
+#define DRONE_EASY_CLIMB		5.0f	// climb or sink rate at full throttle input, m/s
+#define DRONE_EASY_TILT			35.0f	// most it tilts to reach the commanded speed, deg
+#define DRONE_EASY_VTAU			0.5f	// horizontal speed response, s
+#define DRONE_EASY_ZTAU			0.25f	// climb rate response, s
+#define DRONE_EASY_YAWGAIN		12.0f	// heading error to yaw rate, 1/s
+#define DRONE_EASY_MAXYAW		720.0f	// deg/s
+#define DRONE_EASY_MAXPITCH		88.0f	// view pitch limit, deg (as for normal players)
+
+// what one move feeds every substep
+typedef struct {
+	int			mode;			// DRONE_MODE_*
+	float		throttle;		// 0..1 (acro, level)
+	float		sticks[3];		// roll, pitch, yaw, -1..1
+	float		climb;			// -1..1 (easy)
+	float		viewYaw;		// deg (easy: heading to fly and point at)
+	qboolean	inWater;
+} droneInput_t;
 
 /*
 ==================
@@ -54,6 +81,10 @@ void BG_DroneDefaults( droneParams_t *p ) {
 	p->crashSpeed = 0.0f;
 	p->bounce = 0.3f;
 	p->friction = 0.6f;
+	p->weapons = 1;
+
+	p->mode = DRONE_MODE_ACRO;
+	p->camAngle = 30.0f;
 
 	for ( i = 0; i < 3; i++ ) {
 		p->rcRate[i] = 1.0f;
@@ -103,6 +134,32 @@ void BG_DroneParseRates( const char *s, droneParams_t *p ) {
 				p->expo[i / 3] = v;
 			}
 			break;
+		}
+	}
+}
+
+/*
+==================
+BG_DroneParsePilot
+
+dr_mode and dr_camangle from a client. Missing or invalid values keep what
+is already in p.
+==================
+*/
+void BG_DroneParsePilot( const char *mode, const char *camAngle, droneParams_t *p ) {
+	int		m;
+	float	a;
+
+	if ( mode && mode[0] ) {
+		m = atoi( mode );
+		if ( m >= DRONE_MODE_ACRO && m <= DRONE_MODE_EASY ) {
+			p->mode = m;
+		}
+	}
+	if ( camAngle && camAngle[0] ) {
+		a = atof( camAngle );
+		if ( a >= 0.0f && a <= 80.0f ) {
+			p->camAngle = a;
 		}
 	}
 }
@@ -353,14 +410,163 @@ static void Drone_Impact( const droneParams_t *p, vec3_t axis[3], vec3_t w, vec3
 
 /*
 ==================
+Drone_Heading
+
+Unit horizontal vector the drone points along. With the nose straight up
+or down, the top of the frame gives the heading instead.
+==================
+*/
+static void Drone_Heading( vec3_t axis[3], vec3_t out ) {
+	VectorSet( out, axis[0][0], axis[0][1], 0.0f );
+	if ( VectorNormalize( out ) > 0.2f ) {
+		return;
+	}
+	// nose down: the top points ahead; nose up: it points back
+	if ( axis[0][2] < 0.0f ) {
+		VectorSet( out, axis[2][0], axis[2][1], 0.0f );
+	} else {
+		VectorSet( out, -axis[2][0], -axis[2][1], 0.0f );
+	}
+	if ( VectorNormalize( out ) < 1e-3f ) {
+		VectorSet( out, 1.0f, 0.0f, 0.0f );
+	}
+}
+
+/*
+==================
+Drone_LevelTarget
+
+Target body rates (rad/s) for level and easy mode: turn the thrust axis
+toward a wanted tilt, and yaw about the world vertical.
+==================
+*/
+static void Drone_LevelTarget( const droneParams_t *p, vec3_t axis[3], const vec3_t velocity,
+							   const droneInput_t *in, vec3_t target ) {
+	static const vec3_t	worldUp = { 0.0f, 0.0f, 1.0f };
+	vec3_t	heading, right, tilt, upWant, err, ww, vWant, vfwd, vright;
+	float	t, s, c, angle, rate, yawRate, g, vlen, maxTilt;
+
+	Drone_Heading( axis, heading );
+	VectorSet( right, heading[1], -heading[0], 0.0f );
+
+	if ( in->mode == DRONE_MODE_EASY ) {
+		// tilt toward the acceleration that reaches the commanded velocity
+		t = DEG2RAD( in->viewYaw );
+		VectorSet( vfwd, cos( t ), sin( t ), 0.0f );
+		VectorSet( vright, sin( t ), -cos( t ), 0.0f );
+		VectorScale( vfwd, in->sticks[1], vWant );
+		VectorMA( vWant, in->sticks[0], vright, vWant );
+		vlen = VectorLength( vWant );
+		if ( vlen > 1.0f ) {
+			VectorScale( vWant, 1.0f / vlen, vWant );
+		}
+		VectorScale( vWant, DRONE_EASY_SPEED * p->scale, vWant );
+
+		// plus what it takes to hold that speed against drag
+		g = p->gravity * p->scale;
+		vlen = VectorLength( vWant ) * p->dragSide / p->scale;
+		tilt[0] = ( vWant[0] * vlen + ( vWant[0] - velocity[0] ) / DRONE_EASY_VTAU ) / g;
+		tilt[1] = ( vWant[1] * vlen + ( vWant[1] - velocity[1] ) / DRONE_EASY_VTAU ) / g;
+		tilt[2] = 0.0f;
+		maxTilt = tan( DEG2RAD( DRONE_EASY_TILT ) );
+		vlen = VectorLength( tilt );
+		if ( vlen > maxTilt ) {
+			VectorScale( tilt, maxTilt / vlen, tilt );
+		}
+	} else {
+		// sticks are the tilt: + pitch noses down, + roll rolls right
+		VectorScale( heading, tan( DEG2RAD( in->sticks[1] * DRONE_LEVEL_ANGLE ) ), tilt );
+		VectorMA( tilt, tan( DEG2RAD( in->sticks[0] * DRONE_LEVEL_ANGLE ) ), right, tilt );
+	}
+	VectorAdd( tilt, worldUp, upWant );
+	VectorNormalize( upWant );
+
+	// rotation that takes the current thrust axis onto the wanted one
+	CrossProduct( axis[2], upWant, err );
+	s = VectorNormalize( err );
+	c = DotProduct( axis[2], upWant );
+	if ( s < 1e-5f ) {
+		if ( c > 0.0f ) {
+			VectorClear( err );
+		} else {
+			VectorCopy( axis[0], err );		// upside down: roll back over
+		}
+	}
+	angle = atan2( s, c );
+	rate = angle * DRONE_LEVEL_GAIN;
+	if ( rate > DRONE_LEVEL_MAXRATE ) {
+		rate = DRONE_LEVEL_MAXRATE;
+	}
+	VectorScale( err, rate, ww );
+
+	// yaw about the world vertical; + yaw stick (or a view to the right) yaws right
+	if ( in->mode == DRONE_MODE_EASY ) {
+		yawRate = AngleNormalize180( in->viewYaw - RAD2DEG( atan2( heading[1], heading[0] ) ) )
+			* DRONE_EASY_YAWGAIN;
+		if ( yawRate > DRONE_EASY_MAXYAW ) {
+			yawRate = DRONE_EASY_MAXYAW;
+		} else if ( yawRate < -DRONE_EASY_MAXYAW ) {
+			yawRate = -DRONE_EASY_MAXYAW;
+		}
+	} else {
+		yawRate = -BG_DroneRate( p, 2, in->sticks[2] );
+	}
+	ww[2] += DEG2RAD( yawRate );
+
+	Drone_WorldToBody( axis, ww, target );
+}
+
+/*
+==================
+Drone_EasyMotor
+
+Easy mode altitude hold: the motor output that gives the commanded climb
+rate, allowing for tilt and for the thrust lost to inflow.
+==================
+*/
+static float Drone_EasyMotor( const droneParams_t *p, vec3_t axis[3], const vec3_t velocity,
+							  float inflow, float climb, qboolean grounded ) {
+	float	g, climbWant, accel, thrust, m;
+
+	climbWant = climb * DRONE_EASY_CLIMB * p->scale;
+	if ( grounded && climbWant <= 0.0f ) {
+		return p->idle;		// sit on the floor instead of hovering against it
+	}
+	if ( axis[2][2] < 0.3f ) {
+		return p->idle;		// far from level: let the attitude loop turn it over first
+	}
+
+	g = p->gravity * p->scale;
+	accel = ( climbWant - velocity[2] ) / DRONE_EASY_ZTAU
+		+ climbWant * fabs( climbWant ) * p->dragTop / p->scale;	// drag at that climb rate
+	if ( accel < -g ) {
+		accel = -g;
+	} else if ( accel > 2.0f * g ) {
+		accel = 2.0f * g;
+	}
+	thrust = ( g + accel ) / axis[2][2];
+
+	if ( inflow < 0.2f ) {
+		inflow = 0.2f;
+	}
+	m = sqrt( thrust / ( p->twr * g * inflow ) );
+	if ( m < p->idle ) {
+		m = p->idle;
+	} else if ( m > 1.0f ) {
+		m = 1.0f;
+	}
+	return m;
+}
+
+/*
+==================
 Drone_Step
 
 One fixed substep. Returns qtrue if anything was touched.
 ==================
 */
 static qboolean Drone_Step( pmove_t *pmv, const droneParams_t *p, vec3_t axis[3], vec3_t w,
-							float *motor, float throttle, const float sticks[3], int *flags,
-							qboolean inWater, float dt ) {
+							float *motor, const droneInput_t *in, int *flags, float dt ) {
 	playerState_t	*ps = pmv->ps;
 	vec3_t	target, ww, accel, end, probe, down;
 	trace_t	tr;
@@ -371,6 +577,7 @@ static qboolean Drone_Step( pmove_t *pmv, const droneParams_t *p, vec3_t axis[3]
 
 	armed = ( *flags & DRF_ARMED ) != 0;
 	touched = qfalse;
+	g = p->gravity * p->scale;
 
 	// sitting on the floor without enough thrust to lift: the frame rests on
 	// the ground instead of the rate loop holding whatever tilt it landed at
@@ -380,11 +587,15 @@ static qboolean Drone_Step( pmove_t *pmv, const droneParams_t *p, vec3_t axis[3]
 	// rotation
 	//
 	if ( armed && !onGround ) {
-		// + roll stick rolls right (+ about forward), + pitch stick noses down
-		// (+ about left), + yaw stick yaws right (- about up)
-		target[0] = DEG2RAD( BG_DroneRate( p, 0, sticks[0] ) );
-		target[1] = DEG2RAD( BG_DroneRate( p, 1, sticks[1] ) );
-		target[2] = -DEG2RAD( BG_DroneRate( p, 2, sticks[2] ) );
+		if ( in->mode == DRONE_MODE_ACRO ) {
+			// + roll stick rolls right (+ about forward), + pitch stick noses down
+			// (+ about left), + yaw stick yaws right (- about up)
+			target[0] = DEG2RAD( BG_DroneRate( p, 0, in->sticks[0] ) );
+			target[1] = DEG2RAD( BG_DroneRate( p, 1, in->sticks[1] ) );
+			target[2] = -DEG2RAD( BG_DroneRate( p, 2, in->sticks[2] ) );
+		} else {
+			Drone_LevelTarget( p, axis, ps->velocity, in, target );
+		}
 		k = dt / ( p->rateTau + dt );
 		for ( i = 0; i < 3; i++ ) {
 			w[i] += ( target[i] - w[i] ) * k;
@@ -400,14 +611,6 @@ static qboolean Drone_Step( pmove_t *pmv, const droneParams_t *p, vec3_t axis[3]
 	//
 	// motors
 	//
-	motorTarget = armed ? p->idle + ( 1.0f - p->idle ) * throttle : 0.0f;
-	*motor += ( motorTarget - *motor ) * dt / ( p->motorTau + dt );
-
-	//
-	// forces, in units/s^2
-	//
-	g = p->gravity * p->scale;
-
 	vAxial = DotProduct( ps->velocity, axis[2] ) / p->scale;
 	inflow = 1.0f - vAxial / ( p->propSpeed * ( *motor > 0.1f ? *motor : 0.1f ) );
 	if ( inflow < 0.0f ) {
@@ -415,10 +618,24 @@ static qboolean Drone_Step( pmove_t *pmv, const droneParams_t *p, vec3_t axis[3]
 	} else if ( inflow > 1.2f ) {
 		inflow = 1.2f;
 	}
+
+	if ( !armed ) {
+		motorTarget = 0.0f;
+	} else if ( in->mode == DRONE_MODE_EASY ) {
+		motorTarget = Drone_EasyMotor( p, axis, ps->velocity, inflow, in->climb,
+			( *flags & DRF_GROUNDED ) != 0 );
+	} else {
+		motorTarget = p->idle + ( 1.0f - p->idle ) * in->throttle;
+	}
+	*motor += ( motorTarget - *motor ) * dt / ( p->motorTau + dt );
+
+	//
+	// forces, in units/s^2
+	//
 	thrust = p->twr * g * ( *motor ) * ( *motor ) * inflow;
 
-	dragScale = inWater ? 20.0f : 1.0f;
-	if ( inWater ) {
+	dragScale = in->inWater ? 20.0f : 1.0f;
+	if ( in->inWater ) {
 		thrust *= 0.3f;
 	}
 
@@ -531,10 +748,12 @@ void PM_DroneMove( pmove_t *pmv, int msec ) {
 	playerState_t	*ps = pmv->ps;
 	droneParams_t	defaults;
 	const droneParams_t	*p;
-	vec3_t	axis[3], w;
-	float	motor, throttle, sticks[3], dt;
+	droneInput_t	in;
+	vec3_t	axis[3], w, cam, aim;
+	float	motor, dt, tilt, c, s;
 	int		flags, steps, i, buttons;
-	qboolean touched, inWater;
+	short	pitch;
+	qboolean touched;
 
 	p = pmv->drone;
 	if ( !p ) {
@@ -544,18 +763,32 @@ void PM_DroneMove( pmove_t *pmv, int msec ) {
 
 	buttons = pmv->cmd.buttons;
 	flags = ps->stats[STAT_DRONE_FLAGS];
-	throttle = BG_DroneThrottle( pmv->cmd.upmove );
-	sticks[0] = pmv->cmd.rightmove / 127.0f;
-	sticks[1] = pmv->cmd.forwardmove / 127.0f;
-	sticks[2] = pmv->droneYawStick;
 
-	// talk balloon, never firing
+	memset( &in, 0, sizeof( in ) );
+	in.mode = p->mode;
+	in.throttle = BG_DroneThrottle( pmv->cmd.upmove );
+	in.climb = pmv->cmd.upmove / 127.0f;
+	in.sticks[0] = pmv->cmd.rightmove / 127.0f;
+	in.sticks[1] = pmv->cmd.forwardmove / 127.0f;
+	in.sticks[2] = pmv->droneYawStick;
+
+	if ( in.mode == DRONE_MODE_EASY ) {
+		// the view angles are the aim: clamp the pitch the way
+		// PM_UpdateViewAngles does for a normal player
+		pitch = pmv->cmd.angles[PITCH] + ps->delta_angles[PITCH];
+		if ( pitch > ANGLE2SHORT( DRONE_EASY_MAXPITCH ) ) {
+			ps->delta_angles[PITCH] = ANGLE2SHORT( DRONE_EASY_MAXPITCH ) - pmv->cmd.angles[PITCH];
+		} else if ( pitch < -ANGLE2SHORT( DRONE_EASY_MAXPITCH ) ) {
+			ps->delta_angles[PITCH] = -ANGLE2SHORT( DRONE_EASY_MAXPITCH ) - pmv->cmd.angles[PITCH];
+		}
+		in.viewYaw = SHORT2ANGLE( (short)( pmv->cmd.angles[YAW] + ps->delta_angles[YAW] ) );
+	}
+
 	if ( buttons & BUTTON_TALK ) {
 		ps->eFlags |= EF_TALK;
 	} else {
 		ps->eFlags &= ~EF_TALK;
 	}
-	ps->eFlags &= ~EF_FIRING;
 
 	// The drone is armed whenever it is alive, except right after a spawn:
 	// the motors stay off until some stick input arrives. A gamepad reports
@@ -563,7 +796,7 @@ void PM_DroneMove( pmove_t *pmv, int msec ) {
 	// throttle, which would launch the drone into the ceiling. A crash
 	// (dr_crash) disarms it until the next respawn.
 	if ( !( flags & DRF_LIVE ) && ( pmv->cmd.upmove || pmv->cmd.rightmove
-			|| pmv->cmd.forwardmove || sticks[2] != 0.0f ) ) {
+			|| pmv->cmd.forwardmove || in.sticks[2] != 0.0f ) ) {
 		flags |= DRF_LIVE;
 	}
 	if ( ( flags & DRF_LIVE ) && !( flags & DRF_CRASHED ) ) {
@@ -595,7 +828,7 @@ void PM_DroneMove( pmove_t *pmv, int msec ) {
 	w[2] = DEG2RAD( ps->grapplePoint[2] );
 	motor = ps->stats[STAT_DRONE_MOTOR] / (float)DRONE_MOTOR_SCALE;
 
-	inWater = ( pmv->pointcontents( ps->origin, ps->clientNum ) & MASK_WATER ) != 0;
+	in.inWater = ( pmv->pointcontents( ps->origin, ps->clientNum ) & MASK_WATER ) != 0;
 
 	steps = ( msec + DRONE_MAX_SUBSTEP_MS - 1 ) / DRONE_MAX_SUBSTEP_MS;
 	if ( steps < 1 ) {
@@ -605,7 +838,7 @@ void PM_DroneMove( pmove_t *pmv, int msec ) {
 
 	touched = qfalse;
 	for ( i = 0; i < steps; i++ ) {
-		if ( Drone_Step( pmv, p, axis, w, &motor, throttle, sticks, &flags, inWater, dt ) ) {
+		if ( Drone_Step( pmv, p, axis, w, &motor, &in, &flags, dt ) ) {
 			touched = qtrue;
 		}
 	}
@@ -628,7 +861,24 @@ void PM_DroneMove( pmove_t *pmv, int msec ) {
 		motor = 1.0f;
 	}
 	ps->stats[STAT_DRONE_MOTOR] = (int)( motor * DRONE_MOTOR_SCALE + 0.5f );
+	flags = ( flags & ~DRF_MODE_MASK ) | ( in.mode << DRF_MODE_SHIFT );
 	ps->stats[STAT_DRONE_FLAGS] = flags;
+
+	// aim: the view in easy mode, otherwise the FPV camera (tilted up from the frame)
+	if ( in.mode == DRONE_MODE_EASY ) {
+		aim[PITCH] = SHORT2ANGLE( (short)( pmv->cmd.angles[PITCH] + ps->delta_angles[PITCH] ) );
+		aim[YAW] = in.viewYaw;
+	} else {
+		tilt = DEG2RAD( p->camAngle );
+		c = cos( tilt );
+		s = sin( tilt );
+		for ( i = 0; i < 3; i++ ) {
+			cam[i] = axis[0][i] * c + axis[2][i] * s;
+		}
+		vectoangles( cam, aim );
+	}
+	ps->stats[STAT_DRONE_AIM_PITCH] = (short)ANGLE2SHORT( aim[PITCH] );
+	ps->stats[STAT_DRONE_AIM_YAW] = (short)ANGLE2SHORT( aim[YAW] );
 	ps->generic1 = DRONE_ENT_FLAG | ( (int)( motor * DRONE_ENT_MOTORMASK + 0.5f ) & DRONE_ENT_MOTORMASK );
 
 	// water level for drowning and splashes
@@ -639,6 +889,30 @@ void PM_DroneMove( pmove_t *pmv, int msec ) {
 		pmv->waterlevel = 0;
 		pmv->watertype = 0;
 	}
+}
+
+/*
+==================
+BG_DroneAimAngles
+
+Direction a drone's shots go (pitch, yaw; roll 0), as left by its last move.
+==================
+*/
+void BG_DroneAimAngles( const playerState_t *ps, vec3_t angles ) {
+	angles[PITCH] = SHORT2ANGLE( (short)ps->stats[STAT_DRONE_AIM_PITCH] );
+	angles[YAW] = SHORT2ANGLE( (short)ps->stats[STAT_DRONE_AIM_YAW] );
+	angles[ROLL] = 0.0f;
+}
+
+/*
+==================
+BG_DroneMode
+
+Flight mode the drone flew its last move in.
+==================
+*/
+int BG_DroneMode( const playerState_t *ps ) {
+	return ( ps->stats[STAT_DRONE_FLAGS] & DRF_MODE_MASK ) >> DRF_MODE_SHIFT;
 }
 
 /*
@@ -675,4 +949,9 @@ void BG_DroneSanitize( droneParams_t *p ) {
 	p->crashSpeed = Drone_Clamp( p->crashSpeed, 0.0f, 200.0f, 0.0f );
 	p->bounce = Drone_Clamp( p->bounce, 0.0f, 1.0f, 0.3f );
 	p->friction = Drone_Clamp( p->friction, 0.0f, 3.0f, 0.6f );
+	p->weapons = p->weapons ? 1 : 0;
+	if ( p->mode < DRONE_MODE_ACRO || p->mode > DRONE_MODE_EASY ) {
+		p->mode = DRONE_MODE_ACRO;
+	}
+	p->camAngle = Drone_Clamp( p->camAngle, 0.0f, 80.0f, 30.0f );
 }

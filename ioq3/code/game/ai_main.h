@@ -271,6 +271,12 @@ typedef struct bot_state_s
 	bot_waypoint_t *patrolpoints;					//patrol points
 	bot_waypoint_t *curpatrolpoint;					//current patrol point the bot is going for
 	int patrolflags;								//patrol flags
+
+	// fpvq3 drone autopilot (ai_drone.c)
+	vec3_t drone_target;							//route point to fly straight at
+	vec3_t drone_climbto;							//further route point, sets the height to fly at
+	qboolean drone_targetvisible;					//drone_target can be flown to in a line
+	float drone_targettime;							//when the route points were picked
 } bot_state_t;
 
 //resets the whole bot state

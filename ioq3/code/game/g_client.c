@@ -822,9 +822,15 @@ void ClientUserinfoChanged( int clientNum ) {
 		client->pers.teamInfo = qfalse;
 	}
 #endif
-	// fpvq3 rates
+	// fpvq3 pilot settings: rates, flight mode, camera uptilt (= aim in acro and level)
 	BG_DroneDefaults( &client->pers.droneRates );
 	BG_DroneParseRates( Info_ValueForKey( userinfo, "dr_rates" ), &client->pers.droneRates );
+	if ( ent->r.svFlags & SVF_BOT ) {
+		client->pers.droneRates.mode = DRONE_MODE_EASY;		// the bot autopilot (ai_drone.c) flies easy mode
+	} else {
+		BG_DroneParsePilot( Info_ValueForKey( userinfo, "dr_mode" ),
+			Info_ValueForKey( userinfo, "dr_camangle" ), &client->pers.droneRates );
+	}
 
 	/*
 	s = Info_ValueForKey( userinfo, "cg_pmove_fixed" );

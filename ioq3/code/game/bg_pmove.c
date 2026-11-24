@@ -1857,7 +1857,28 @@ void PmoveSingle (pmove_t *pmove) {
 			msec = 200;
 		}
 		pm->ps->commandTime = pmove->cmd.serverTime;
+
+		memset( &pml, 0, sizeof( pml ) );
+		pml.msec = msec;
+		pml.frametime = msec * 0.001f;
+
 		PM_DroneMove( pm, msec );
+
+		// weapons work as for a normal player, aimed along BG_DroneAimAngles
+		if ( pm->drone && pm->drone->weapons ) {
+			if ( !( pm->ps->pm_flags & PMF_RESPAWNED ) && ( pm->cmd.buttons & BUTTON_ATTACK )
+					&& pm->ps->ammo[ pm->ps->weapon ] ) {
+				pm->ps->eFlags |= EF_FIRING;
+			} else {
+				pm->ps->eFlags &= ~EF_FIRING;
+			}
+			if ( !( pm->cmd.buttons & ( BUTTON_ATTACK | BUTTON_USE_HOLDABLE ) ) ) {
+				pm->ps->pm_flags &= ~PMF_RESPAWNED;
+			}
+			PM_Weapon();
+		} else {
+			pm->ps->eFlags &= ~EF_FIRING;
+		}
 		return;		// velocity is deliberately not snapped
 	}
 

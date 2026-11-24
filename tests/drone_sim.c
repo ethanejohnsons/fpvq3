@@ -32,6 +32,7 @@ static int NoContents( const vec3_t p, int pass ) { return 0; }
 static playerState_t ps;
 static pmove_t pm;
 static droneParams_t params;
+static float viewPitch, viewYaw;	// easy mode: the view angles sent in the usercmd
 
 static void Reset( float z, float pitch, float roll ) {
 	memset( &ps, 0, sizeof( ps ) );
@@ -52,9 +53,15 @@ static void Run( int ms, float throttle, float roll, float pitch, float yaw, int
 		pm.cmd.rightmove = (signed char)( roll * 127 );
 		pm.cmd.forwardmove = (signed char)( pitch * 127 );
 		pm.cmd.buttons = buttons;
+		pm.cmd.angles[PITCH] = ANGLE2SHORT( viewPitch );
+		pm.cmd.angles[YAW] = ANGLE2SHORT( viewYaw );
 		pm.droneYawStick = yaw;
 		PM_DroneMove( &pm, 4 );
 	}
+}
+
+static float HorizSpeed( void ) {
+	return sqrt( ps.velocity[0] * ps.velocity[0] + ps.velocity[1] * ps.velocity[1] ) / params.scale;
 }
 
 static int failures;
@@ -184,6 +191,108 @@ int main( void ) {
 		for ( k = 0; k < 3; k++ ) for ( j = 0; j < 3; j++ ) err += fabs( ax[k][j] - ax2[k][j] );
 		Check( "axis->angles round trip near vertical", err < 1e-3f, "err=%g", err );
 	}
+
+	// 12. aim in acro: the FPV camera, tilted up from the frame
+	Reset( 500, 0, 0 );
+	Run( 50, 0, 0, 0, 0, 0 );
+	{
+		vec3_t aim;
+		BG_DroneAimAngles( &ps, aim );
+		Check( "acro aims along the 30 deg camera", fabs( aim[PITCH] + 30 ) < 0.5f && BG_DroneMode( &ps ) == DRONE_MODE_ACRO,
+			"aim pitch=%.1f", aim[PITCH] );
+	}
+
+	//
+	// level mode
+	//
+	params.mode = DRONE_MODE_LEVEL;
+
+	// 13. full roll stick holds the angle limit, release levels it
+	Reset( 3000, 0, 0 );
+	Run( 50, 0, 0, 0, 0, 0 );
+	Run( 600, hover, 1, 0, 0, 0 );
+	Check( "level: full roll stick tilts ~55 deg", fabs( ps.viewangles[ROLL] - 55 ) < 3,
+		"roll=%.1f", ps.viewangles[ROLL] );
+	Run( 600, hover, 0, 0, 0, 0 );
+	Check( "level: released sticks return to level", fabs( ps.viewangles[ROLL] ) < 1 && fabs( ps.viewangles[PITCH] ) < 1,
+		"pitch=%.2f roll=%.2f", ps.viewangles[PITCH], ps.viewangles[ROLL] );
+
+	// 14. full pitch stick noses down to the limit and stays there
+	Run( 600, hover, 0, 1, 0, 0 );
+	Check( "level: full pitch stick noses down ~55 deg", fabs( ps.viewangles[PITCH] - 55 ) < 3,
+		"pitch=%.1f", ps.viewangles[PITCH] );
+
+	// 15. upside down in the air: rights itself
+	Reset( 3000, 0, 180 );
+	Run( 50, 0.6f, 0, 0, 0, 0 );
+	Run( 1000, hover, 0, 0, 0, 0 );
+	Check( "level: recovers from upside down", fabs( ps.viewangles[ROLL] ) < 2 && fabs( ps.viewangles[PITCH] ) < 2,
+		"pitch=%.1f roll=%.1f", ps.viewangles[PITCH], ps.viewangles[ROLL] );
+
+	// 16. yaw stick still turns at the acro yaw rate
+	Reset( 3000, 0, 0 );
+	Run( 50, 0.6f, 0, 0, 0, 0 );
+	Run( 300, hover, 0, 0, 1, 0 );
+	Check( "level: full yaw stick ~667 deg/s", fabs( -ps.grapplePoint[2] - 666.7f ) < 20,
+		"yaw rate=%.1f", -ps.grapplePoint[2] );
+
+	//
+	// easy mode
+	//
+	params.mode = DRONE_MODE_EASY;
+	viewPitch = viewYaw = 0;
+
+	// 17. centred sticks hold altitude
+	Reset( 3000, 0, 0 );
+	Run( 50, 0.6f, 0, 0, 0, 0 );		// any input arms it
+	z0 = ps.origin[2];
+	Run( 3000, 0.5f, 0, 0, 0, 0 );		// all-zero command
+	Check( "easy: centred sticks hold altitude", fabs( ps.origin[2] - z0 ) < 16 && fabs( ps.velocity[2] ) < 4,
+		"dz=%.1f vz=%.1f", ps.origin[2] - z0, ps.velocity[2] );
+
+	// 18. full climb input climbs at ~5 m/s, full down sinks at ~5 m/s
+	Run( 2000, 1, 0, 0, 0, 0 );
+	Check( "easy: full climb ~5 m/s", fabs( ps.velocity[2] / params.scale - 5 ) < 0.5f,
+		"%.2f m/s", ps.velocity[2] / params.scale );
+	Run( 2000, 0, 0, 0, 0, 0 );
+	Check( "easy: full sink ~5 m/s", fabs( ps.velocity[2] / params.scale + 5 ) < 0.5f,
+		"%.2f m/s", ps.velocity[2] / params.scale );
+
+	// 19. full forward stick reaches the set speed along the view, release stops it
+	viewYaw = 90;
+	Reset( 3000, 0, 0 );
+	Run( 50, 0.6f, 0, 0, 0, 0 );
+	Run( 5000, 0.5f, 0, 1, 0, 0 );
+	Check( "easy: full stick flies ~14 m/s along the view", fabs( HorizSpeed() - 14 ) < 1.5f
+		&& ps.velocity[1] > 0.95f * HorizSpeed() * params.scale,
+		"%.1f m/s (vx %.0f vy %.0f)", HorizSpeed(), ps.velocity[0], ps.velocity[1] );
+	Check( "easy: the frame turns to the view heading", fabs( AngleNormalize180( ps.viewangles[YAW] - 90 ) ) < 2,
+		"yaw=%.1f", ps.viewangles[YAW] );
+	Run( 3000, 0.5f, 0, 0, 0, 0 );
+	Check( "easy: released sticks stop it", HorizSpeed() < 0.5f && fabs( ps.viewangles[PITCH] ) < 2,
+		"%.2f m/s pitch=%.1f", HorizSpeed(), ps.viewangles[PITCH] );
+
+	// 20. aim follows the view, not the frame
+	viewPitch = 20;
+	Run( 100, 0.5f, 1, 0, 0, 0 );
+	{
+		vec3_t aim;
+		BG_DroneAimAngles( &ps, aim );
+		Check( "easy: aims along the view", fabs( aim[PITCH] - 20 ) < 0.1f && fabs( aim[YAW] - 90 ) < 0.1f,
+			"aim pitch=%.1f yaw=%.1f", aim[PITCH], aim[YAW] );
+	}
+	viewPitch = 0;
+
+	// 21. sitting on the floor with centred sticks stays put
+	Reset( 3.2f, 0, 0 );
+	Run( 50, 0.6f, 0, 0, 0, 0 );
+	Run( 2000, 0.5f, 0, 0, 0, 0 );
+	Check( "easy: stays on the floor until climb input", ps.origin[2] < 4 && ps.stats[STAT_DRONE_MOTOR] < 0.1f * DRONE_MOTOR_SCALE,
+		"z=%.2f motor=%d", ps.origin[2], ps.stats[STAT_DRONE_MOTOR] );
+	Run( 1000, 1, 0, 0, 0, 0 );
+	Check( "easy: takes off with climb input", ps.origin[2] > 64, "z=%.0f", ps.origin[2] );
+
+	params.mode = DRONE_MODE_ACRO;
 
 	printf( "\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED", failures, failures == 1 ? "" : "s" );
 	return failures != 0;

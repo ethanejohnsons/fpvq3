@@ -139,6 +139,7 @@ vmCvar_t	cg_ignore;
 vmCvar_t	cg_simpleItems;
 vmCvar_t	cg_fov;
 vmCvar_t	dr_rates;
+vmCvar_t	dr_mode;
 vmCvar_t	dr_camangle;
 vmCvar_t	dr_osd;
 vmCvar_t	dr_sticks;
@@ -221,7 +222,11 @@ static cvarTable_t cvarTable[] = {
 	{ &cg_fov, "cg_fov", "90", CVAR_ARCHIVE },
 	// fpvq3: rates go to the server in userinfo so it simulates what we predict
 	{ &dr_rates, "dr_rates", "1.0 0.7 0 1.0 0.7 0 1.0 0.7 0", CVAR_USERINFO | CVAR_ARCHIVE },
-	{ &dr_camangle, "dr_camangle", "30", CVAR_ARCHIVE },
+	// easy by default: it flies with normal Quake binds, for players who
+	// join without our configs (controls/radio.cfg sets acro)
+	{ &dr_mode, "dr_mode", "2", CVAR_USERINFO | CVAR_ARCHIVE },
+	// the camera uptilt is also where shots go, so the server needs it too
+	{ &dr_camangle, "dr_camangle", "30", CVAR_USERINFO | CVAR_ARCHIVE },
 	{ &dr_osd, "dr_osd", "1", CVAR_ARCHIVE },
 	{ &dr_sticks, "dr_sticks", "1", CVAR_ARCHIVE },
 	{ &dr_camstep, "dr_camstep", "5", CVAR_ARCHIVE },

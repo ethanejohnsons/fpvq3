@@ -1018,6 +1018,9 @@ static void CG_LightningBolt( centity_t *cent, vec3_t origin ) {
 
 	VectorMA( muzzlePoint, 14, forward, muzzlePoint );
 
+	// fpvq3: a drone's view angles are its attitude; it fires along its aim
+	CG_DroneMuzzle( cent, muzzlePoint, forward );
+
 	// project forward by the lightning range
 	VectorMA( muzzlePoint, LIGHTNING_RANGE, forward, endPoint );
 
@@ -1215,6 +1218,7 @@ void CG_AddPlayerWeapon( refEntity_t *parent, playerState_t *ps, centity_t *cent
 	VectorCopy( parent->lightingOrigin, gun.lightingOrigin );
 	gun.shadowPlane = parent->shadowPlane;
 	gun.renderfx = parent->renderfx;
+	gun.nonNormalizedAxes = parent->nonNormalizedAxes;	// fpvq3: scaled-down gun on a drone
 
 	// set custom shading for railgun refire rate
 	if( weaponNum == WP_RAILGUN ) {
@@ -1273,6 +1277,7 @@ void CG_AddPlayerWeapon( refEntity_t *parent, playerState_t *ps, centity_t *cent
 		VectorCopy( parent->lightingOrigin, barrel.lightingOrigin );
 		barrel.shadowPlane = parent->shadowPlane;
 		barrel.renderfx = parent->renderfx;
+		barrel.nonNormalizedAxes = parent->nonNormalizedAxes;
 
 		barrel.hModel = weapon->barrelModel;
 		angles[YAW] = 0;
@@ -1311,6 +1316,7 @@ void CG_AddPlayerWeapon( refEntity_t *parent, playerState_t *ps, centity_t *cent
 	VectorCopy( parent->lightingOrigin, flash.lightingOrigin );
 	flash.shadowPlane = parent->shadowPlane;
 	flash.renderfx = parent->renderfx;
+	flash.nonNormalizedAxes = parent->nonNormalizedAxes;
 
 	flash.hModel = weapon->flashModel;
 	if (!flash.hModel) {
@@ -1365,7 +1371,18 @@ void CG_AddViewWeapon( playerState_t *ps ) {
 		return;
 	}
 
-	if ( ps->pm_type == PM_INTERMISSION || ps->pm_type == PM_DRONE ) {
+	if ( ps->pm_type == PM_INTERMISSION ) {
+		return;
+	}
+
+	if ( ps->pm_type == PM_DRONE ) {
+		// fpvq3: no gun in the FPV view, but show our lightning beam
+		if ( !cg.renderingThirdPerson && ( cg.predictedPlayerState.eFlags & EF_FIRING ) ) {
+			vec3_t	origin;
+
+			VectorMA( cg.refdef.vieworg, -2, cg.refdef.viewaxis[2], origin );
+			CG_LightningBolt( &cg_entities[ps->clientNum], origin );
+		}
 		return;
 	}
 
@@ -2179,6 +2196,17 @@ static qboolean	CG_CalcMuzzlePoint( int entityNum, vec3_t muzzle ) {
 	centity_t	*cent;
 	int			anim;
 
+	cent = &cg_entities[entityNum];
+	if ( entityNum == cg.snap->ps.clientNum && cg.snap->ps.pm_type == PM_DRONE ) {
+		vec3_t	aim;
+
+		// fpvq3: drones fire from the centre along their aim
+		BG_DroneAimAngles( &cg.snap->ps, aim );
+		AngleVectors( aim, forward, NULL, NULL );
+		VectorMA( cg.snap->ps.origin, 14, forward, muzzle );
+		return qtrue;
+	}
+
 	if ( entityNum == cg.snap->ps.clientNum ) {
 		VectorCopy( cg.snap->ps.origin, muzzle );
 		muzzle[2] += cg.snap->ps.viewheight;
@@ -2187,9 +2215,14 @@ static qboolean	CG_CalcMuzzlePoint( int entityNum, vec3_t muzzle ) {
 		return qtrue;
 	}
 
-	cent = &cg_entities[entityNum];
 	if ( !cent->currentValid ) {
 		return qfalse;
+	}
+
+	if ( cent->currentState.generic1 & DRONE_ENT_FLAG ) {
+		AngleVectors( cent->currentState.angles2, forward, NULL, NULL );
+		VectorMA( cent->currentState.pos.trBase, 14, forward, muzzle );
+		return qtrue;
 	}
 
 	VectorCopy( cent->currentState.pos.trBase, muzzle );

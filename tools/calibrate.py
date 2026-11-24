@@ -3,7 +3,8 @@
 
 Walks through the four stick movements and prints the axis mapping part of an
 SDL_GAMECONTROLLERCONFIG line for fly.sh (mode 2: left stick = throttle/yaw,
-right stick = pitch/roll).
+right stick = pitch/roll). Then, optionally, finds the switches you want to
+fire with and reset with (controls/radio.cfg binds them to "a" and "b").
 
 usage: tools/calibrate.py [/dev/input/jsN]
 """
@@ -28,6 +29,21 @@ def wait(prompt):
     input(f'\n>> {prompt}\n   Hold it there and press Enter... ')
 
 
+def find_switch(dev, what, used):
+    """Ask for a switch to be held on; return its button number, or None to skip."""
+    _, _, before = read_state(dev)
+    answer = input(f'\n>> Switch for {what}: hold it ON and press Enter (or type s and Enter to skip)... ')
+    if answer.strip().lower().startswith('s'):
+        return None
+    _, _, now = read_state(dev)
+    changed = [i for i, (b, n) in enumerate(zip(before, now)) if b != n and i not in used]
+    if len(changed) != 1:
+        print(f'   {"no button changed" if not changed else f"buttons {changed} all changed"}; skipped')
+        return None
+    print(f'   {what}: button {changed[0]}')
+    return changed[0]
+
+
 def main():
     wait('Throttle LOW, other sticks CENTRED.')
     name, base, _ = read_state(DEV)
@@ -48,7 +64,14 @@ def main():
         mapping.append(f'{sdl_axis}:a{axis}{invert}')
         print(f'   {channel}: axis {axis}{" (reversed)" if invert else ""}')
 
-    print('\nAxis mapping for SDL_GAMECONTROLLERCONFIG (see fly.sh):')
+    used = set()
+    for sdl_button, what in (('a', 'fire (a momentary switch works best)'), ('b', 'reset')):
+        button = find_switch(DEV, what, used)
+        if button is not None:
+            used.add(button)
+            mapping.append(f'{sdl_button}:b{button}')
+
+    print('\nMapping for SDL_GAMECONTROLLERCONFIG (see fly.sh):')
     print('   ' + ','.join(mapping))
     return 0
 

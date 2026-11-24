@@ -1489,6 +1489,11 @@ void BG_PlayerStateToEntityState( playerState_t *ps, entityState_t *s, qboolean 
 	}
 
 	s->angles2[YAW] = ps->movementDir;
+	if ( ps->pm_type == PM_DRONE ) {
+		// fpvq3: aim (as BG_DroneAimAngles; the ui module has no bg_drone.c), for weapon effects
+		s->angles2[PITCH] = SHORT2ANGLE( (short)ps->stats[STAT_DRONE_AIM_PITCH] );
+		s->angles2[YAW] = SHORT2ANGLE( (short)ps->stats[STAT_DRONE_AIM_YAW] );
+	}
 	s->legsAnim = ps->legsAnim;
 	s->torsoAnim = ps->torsoAnim;
 	s->clientNum = ps->clientNum;		// ET_PLAYER looks here instead of at number
@@ -1569,6 +1574,11 @@ void BG_PlayerStateToEntityStateExtraPolate( playerState_t *ps, entityState_t *s
 	}
 
 	s->angles2[YAW] = ps->movementDir;
+	if ( ps->pm_type == PM_DRONE ) {
+		// fpvq3: aim (as BG_DroneAimAngles; the ui module has no bg_drone.c), for weapon effects
+		s->angles2[PITCH] = SHORT2ANGLE( (short)ps->stats[STAT_DRONE_AIM_PITCH] );
+		s->angles2[YAW] = SHORT2ANGLE( (short)ps->stats[STAT_DRONE_AIM_YAW] );
+	}
 	s->legsAnim = ps->legsAnim;
 	s->torsoAnim = ps->torsoAnim;
 	s->clientNum = ps->clientNum;		// ET_PLAYER looks here instead of at number

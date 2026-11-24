@@ -1789,12 +1789,8 @@ void ClientCommand( int clientNum ) {
 		Cmd_Noclip_f (ent);
 	else if (Q_stricmp (cmd, "kill") == 0)
 		Cmd_Kill_f (ent);
-	else if (Q_stricmp (cmd, "dr_reset") == 0) {
-		// fpvq3: instant respawn at a spawn point
-		if ( ent->client->ps.pm_type == PM_DRONE || ent->client->ps.pm_type == PM_DEAD ) {
-			ClientSpawn( ent );
-		}
-	}
+	else if (Q_stricmp (cmd, "dr_reset") == 0)
+		G_DroneReset( ent );	// fpvq3
 	else if (Q_stricmp (cmd, "teamtask") == 0)
 		Cmd_TeamTask_f (ent);
 	else if (Q_stricmp (cmd, "levelshot") == 0)

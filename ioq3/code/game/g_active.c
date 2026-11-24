@@ -834,7 +834,7 @@ void ClientThink_real( gentity_t *ent ) {
 		client->ps.pm_type = PM_NOCLIP;
 	} else if ( client->ps.stats[STAT_HEALTH] <= 0 ) {
 		client->ps.pm_type = PM_DEAD;
-	} else if ( g_drone.integer && !( ent->r.svFlags & SVF_BOT ) ) {
+	} else if ( g_drone.integer ) {
 		client->ps.pm_type = PM_DRONE;
 	} else {
 		client->ps.pm_type = PM_NORMAL;
@@ -847,12 +847,10 @@ void ClientThink_real( gentity_t *ent ) {
 
 		client->pers.droneOldButtons = ucmd->buttons;
 		if ( pressed & BUTTON_DRONE_RESET ) {
-			if ( client->ps.pm_type == PM_DEAD ) {
-				ClientRespawn( ent );
-			} else {
-				ClientSpawn( ent );
+			G_DroneReset( ent );
+			if ( client->ps.pm_type == PM_DRONE || client->ps.stats[STAT_HEALTH] > 0 ) {
+				return;		// respawned
 			}
-			return;
 		}
 		if ( client->ps.pm_type == PM_DEAD ) {
 			client->ps.generic1 = DRONE_ENT_FLAG;	// wreck: drone model, props stopped
@@ -991,6 +989,12 @@ void ClientThink_real( gentity_t *ent ) {
 
 	VectorCopy (pm.mins, ent->r.mins);
 	VectorCopy (pm.maxs, ent->r.maxs);
+	if ( client->ps.pm_type == PM_DRONE && dr_weapons.integer && dr_hitbox.value > DRONE_HALF_SIZE ) {
+		// fpvq3: the frame is tiny; give shots a fairer target than its collision box
+		float h = dr_hitbox.value > 32.0f ? 32.0f : dr_hitbox.value;
+		VectorSet( ent->r.mins, -h, -h, -h );
+		VectorSet( ent->r.maxs, h, h, h );
+	}
 
 	ent->waterlevel = pm.waterlevel;
 	ent->watertype = pm.watertype;
@@ -1067,7 +1071,56 @@ void G_DroneParams( gclient_t *client, droneParams_t *p ) {
 	p->crashSpeed = dr_crash.value;
 	p->bounce = dr_bounce.value;
 	p->friction = dr_friction.value;
+	p->weapons = dr_weapons.integer;
 	BG_DroneSanitize( p );
+}
+
+/*
+==============
+G_IsDrone
+
+fpvq3: a player flying a drone, or the wreck of one.
+==============
+*/
+qboolean G_IsDrone( gentity_t *ent ) {
+	if ( !ent->client ) {
+		return qfalse;
+	}
+	return ent->client->ps.pm_type == PM_DRONE
+		|| ( ent->client->ps.pm_type == PM_DEAD && ( ent->client->ps.generic1 & DRONE_ENT_FLAG ) );
+}
+
+/*
+==============
+G_DroneReset
+
+fpvq3: the reset switch / dr_reset command. Without weapons it puts the
+drone straight back on a spawn point. With weapons that would be a free
+escape and a free heal, so it self-destructs instead (like "kill"), and
+from the wreck it respawns once the normal respawn delay has passed.
+==============
+*/
+void G_DroneReset( gentity_t *ent ) {
+	gclient_t	*client = ent->client;
+
+	if ( !G_IsDrone( ent ) || level.intermissiontime ) {
+		return;
+	}
+
+	if ( client->ps.pm_type == PM_DEAD ) {
+		if ( !dr_weapons.integer || level.time > client->respawnTime ) {
+			ClientRespawn( ent );
+		}
+		return;
+	}
+
+	if ( dr_weapons.integer ) {
+		ent->flags &= ~FL_GODMODE;
+		client->ps.stats[STAT_HEALTH] = ent->health = -999;
+		player_die( ent, ent, ent, 100000, MOD_SUICIDE );
+	} else {
+		ClientSpawn( ent );
+	}
 }
 
 /*
