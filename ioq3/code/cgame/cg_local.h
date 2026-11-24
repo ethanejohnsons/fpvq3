@@ -189,6 +189,9 @@ typedef struct centity_s {
 
 	vec3_t			beamEnd;
 
+	int				droneTrailTime;		// fpvq3: when the trail was last extended
+	vec3_t			droneTrailPos;		// fpvq3: and where to
+
 	// exact interpolated position of entity on this frame
 	vec3_t			lerpOrigin;
 	vec3_t			lerpAngles;
@@ -1144,6 +1147,8 @@ extern	vmCvar_t		dr_osd;
 extern	vmCvar_t		dr_sticks;
 extern	vmCvar_t		dr_camstep;
 extern	vmCvar_t		dr_debug;
+extern	vmCvar_t		dr_dronescale;
+extern	vmCvar_t		dr_trail;
 extern	vmCvar_t		cg_zoomFov;
 extern	vmCvar_t		cg_thirdPersonRange;
 extern	vmCvar_t		cg_thirdPersonAngle;

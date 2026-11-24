@@ -16,6 +16,7 @@ the ioquake3 game source it builds on.
 static droneParams_t	cg_droneServer;		// physics from serverinfo
 static droneParams_t	cg_droneRates;		// rates from our dr_rates cvar
 static droneParams_t	cg_droneCombined;
+static float			cg_droneHitbox = 12.0f;	// server's dr_hitbox: where shots hit a drone
 static int				cg_droneRatesModCount = -1;
 
 static int				cg_droneArmTime;
@@ -97,6 +98,8 @@ void CG_DroneParseServerinfo( const char *info ) {
 	if ( v[0] ) {
 		cg_droneServer.weapons = atoi( v );
 	}
+	cg_droneHitbox = 12.0f;
+	CG_DroneInfoFloat( info, "dr_hitbox", &cg_droneHitbox );
 	BG_DroneSanitize( &cg_droneServer );
 }
 
@@ -313,17 +316,101 @@ Built from polys at runtime so the mod needs no model assets.
 static vec3_t	drone_lightDir = { 0.35f, 0.25f, 0.9f };
 
 #define DRONE_GUN_SCALE		0.25f	// weapon models are sized for a player's hands
+#define DRONE_MODEL_RADIUS	4.4f	// centre to prop tip, model units
+#define DRONE_MAX_DRAWSCALE	8.0f
+
+#define DRONE_TRAIL_STEP	20		// ms between trail puffs
+#define DRONE_TRAIL_LIFE	900		// ms a puff lasts
+#define DRONE_TRAIL_MINSPEED	64.0f	// units/s; slower drones leave no trail
+#define DRONE_TRAIL_RADIUS	2.5f	// model units, so it scales with the drone
+#define DRONE_TRAIL_FADEIN	150		// ms; keeps the trail's head off the drone itself
 
 typedef struct {
 	vec3_t	origin;
 	vec3_t	axis[3];
+	float	scale;		// model units -> world units
 } droneFrame_t;
 
 static void CG_DronePoint( const droneFrame_t *f, const vec3_t local, vec3_t out ) {
 	VectorCopy( f->origin, out );
-	VectorMA( out, local[0], f->axis[0], out );
-	VectorMA( out, local[1], f->axis[1], out );
-	VectorMA( out, local[2], f->axis[2], out );
+	VectorMA( out, local[0] * f->scale, f->axis[0], out );
+	VectorMA( out, local[1] * f->scale, f->axis[1], out );
+	VectorMA( out, local[2] * f->scale, f->axis[2], out );
+}
+
+/*
+=================
+CG_DroneDrawScale
+
+A real 5" quad is a tiny target, smaller than the box shots hit (dr_hitbox).
+Draw other pilots' drones at that box's size so what you aim at is what
+you can hit; dr_dronescale overrides it. Our own drone, seen from the
+chase camera, keeps its real size.
+=================
+*/
+static float CG_DroneDrawScale( int clientNum ) {
+	float s, hitbox;
+
+	if ( clientNum == cg.snap->ps.clientNum ) {
+		return 1.0f;
+	}
+	if ( dr_dronescale.value > 0 ) {
+		s = dr_dronescale.value;
+	} else if ( cg_droneServer.weapons ) {
+		hitbox = cg_droneHitbox;	// as clamped in ClientThink_real
+		if ( hitbox > 32.0f ) {
+			hitbox = 32.0f;
+		}
+		s = hitbox / DRONE_MODEL_RADIUS;
+	} else {
+		s = 1.0f;
+	}
+	if ( s < 1.0f ) {
+		s = 1.0f;
+	} else if ( s > DRONE_MAX_DRAWSCALE ) {
+		s = DRONE_MAX_DRAWSCALE;
+	}
+	return s;
+}
+
+/*
+=================
+CG_DroneTrail
+
+A fading trail of puffs in the pilot's colour behind a moving drone, so
+fast drones can be followed by eye.
+=================
+*/
+static void CG_DroneTrail( centity_t *cent, const vec4_t color, float scale ) {
+	vec3_t	pos;
+	float	frac, speed;
+	int		t, elapsed;
+
+	elapsed = cg.time - cent->droneTrailTime;
+	if ( !dr_trail.integer || cent->droneTrailTime == 0 || elapsed < 0 || elapsed > 250 ) {
+		// first frame, or the drone was out of view or respawned: start afresh
+		cent->droneTrailTime = cg.time;
+		VectorCopy( cent->lerpOrigin, cent->droneTrailPos );
+		return;
+	}
+	if ( elapsed == 0 ) {
+		return;
+	}
+
+	speed = VectorLength( cent->currentState.pos.trDelta );
+	if ( speed >= DRONE_TRAIL_MINSPEED ) {
+		// one puff per step of game time, spread along this frame's movement
+		for ( t = ( cent->droneTrailTime / DRONE_TRAIL_STEP + 1 ) * DRONE_TRAIL_STEP; t <= cg.time; t += DRONE_TRAIL_STEP ) {
+			frac = (float)( t - cent->droneTrailTime ) / elapsed;
+			VectorSubtract( cent->lerpOrigin, cent->droneTrailPos, pos );
+			VectorMA( cent->droneTrailPos, frac, pos, pos );
+			CG_SmokePuff( pos, vec3_origin, DRONE_TRAIL_RADIUS * scale,
+				color[0], color[1], color[2], 0.6f,
+				DRONE_TRAIL_LIFE, t, t + DRONE_TRAIL_FADEIN, LEF_PUFF_DONT_SCALE, cgs.media.smokePuffShader );
+		}
+	}
+	cent->droneTrailTime = cg.time;
+	VectorCopy( cent->lerpOrigin, cent->droneTrailPos );
 }
 
 static void CG_DroneQuad( qhandle_t shader, vec3_t p[4], const vec4_t color ) {
@@ -434,12 +521,19 @@ void CG_DroneEntity( centity_t *cent ) {
 
 	VectorCopy( cent->lerpOrigin, f.origin );
 	AnglesToAxis( cent->lerpAngles, f.axis );
+	f.scale = CG_DroneDrawScale( clientNum );
 
 	ci = &cgs.clientinfo[clientNum];
 	VectorCopy( ci->color1, accent );
 	accent[3] = 1.0f;
 	if ( VectorLength( accent ) < 0.1f ) {
 		VectorSet( accent, 0.2f, 0.8f, 1.0f );
+	}
+
+	if ( !( cent->currentState.eFlags & EF_DEAD ) ) {
+		CG_DroneTrail( cent, accent, f.scale );
+	} else {
+		cent->droneTrailTime = 0;
 	}
 
 	motor = ( cent->currentState.generic1 & DRONE_ENT_MOTORMASK ) / (float)DRONE_ENT_MOTORMASK;
@@ -495,10 +589,10 @@ void CG_DroneEntity( centity_t *cent ) {
 		}
 		AnglesToAxis( aim, gun.axis );
 		for ( i = 0; i < 3; i++ ) {
-			VectorScale( gun.axis[i], DRONE_GUN_SCALE, gun.axis[i] );
+			VectorScale( gun.axis[i], DRONE_GUN_SCALE * f.scale, gun.axis[i] );
 		}
 		gun.nonNormalizedAxes = qtrue;
-		VectorMA( f.origin, -1.4f, f.axis[2], gun.origin );
+		VectorMA( f.origin, -1.4f * f.scale, f.axis[2], gun.origin );
 		VectorCopy( gun.origin, gun.lightingOrigin );
 		gun.renderfx = RF_LIGHTING_ORIGIN;
 		CG_AddPlayerWeapon( &gun, NULL, cent, ci->team );

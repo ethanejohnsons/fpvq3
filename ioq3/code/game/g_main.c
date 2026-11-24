@@ -173,8 +173,9 @@ static cvarTable_t		gameCvarTable[] = {
 	{ &dr_friction, "dr_friction", "0.6", CVAR_SERVERINFO | CVAR_ARCHIVE, 0, qfalse },
 	// 1 = drones carry and fire weapons; 0 = flying only (and dr_reset respawns instantly)
 	{ &dr_weapons, "dr_weapons", "1", CVAR_SERVERINFO | CVAR_ARCHIVE, 0, qfalse },
-	// half size of a drone's hit box when weapons are on; the frame itself is DRONE_HALF_SIZE
-	{ &dr_hitbox, "dr_hitbox", "12", CVAR_ARCHIVE, 0, qfalse },
+	// half size of a drone's hit box when weapons are on; the frame itself is DRONE_HALF_SIZE.
+	// In serverinfo so clients can draw drones at the size they can be hit.
+	{ &dr_hitbox, "dr_hitbox", "12", CVAR_SERVERINFO | CVAR_ARCHIVE, 0, qfalse },
 	{ &dr_botdebug, "dr_botdebug", "0", 0, 0, qfalse },
 	{ &g_knockback, "g_knockback", "1000", 0, 0, qtrue  },
 	{ &g_quadfactor, "g_quadfactor", "3", 0, 0, qtrue  },

@@ -57,15 +57,25 @@ SDL recognises a Jumper T-Pro (OpenTX) as a gamepad, so `fly.sh` passes an `SDL_
 - the left stick carries throttle (CH3) and yaw (CH4)
 - the right stick carries pitch (CH2) and roll (CH1)
 
-`controls/radio.cfg` then binds those sticks to the flight controls. Watch the two stick boxes on the OSD. If an axis is reversed, swap the two commands bound to that stick in `radio.cfg`.
+`controls/radio.cfg` then binds those sticks to the flight controls. Watch the two stick boxes on the OSD.
 
-For another radio, or to fire and reset from switches on the radio, run `tools/calibrate.py`. It walks you through the four stick moves, then the fire and reset switches (both optional), and prints the mapping part of an `SDL_GAMECONTROLLERCONFIG` line. Set your own mapping when you launch, with your radio's SDL GUID (`sdl2-jstest --list` shows it):
+That assumes the radio sends AETR: roll on CH1, pitch on CH2, throttle on CH3, yaw on CH4. If yours uses another order, give it with `CHANNELS=`, one letter per channel starting at CH1 (A roll, E pitch, T throttle, R yaw):
+
+```bash
+CHANNELS=TAER ./fly.sh
+```
+
+If an axis is reversed, swap the two commands bound to that stick in `radio.cfg`.
+
+For another radio, or to fire and reset from switches on the radio, run `tools/calibrate.py`. It walks you through the four stick moves, then the fire and reset switches (both optional), and prints the mapping part of an `SDL_GAMECONTROLLERCONFIG` line. Set your own mapping when you launch, with your radio's SDL GUID (`sdl2-jstest --list` shows it). Replace the GUID's 5th to 8th hex digits with `0000`: they're a checksum of the radio's name, which changes with firmware, and SDL treats `0000` as "any name":
 
 ```bash
 SDL_GAMECONTROLLERCONFIG="<guid>,My Radio,leftx:a3,lefty:a2,rightx:a0,righty:a1,a:b0,b:b1,platform:Linux," ./fly.sh
 ```
 
 `radio.cfg` binds `a` to fire and `b` to reset.
+
+With the T-Pro mapping, the switch on channel 5 fires while it's in its upper position. Pick another switch channel with `FIRE_CHANNEL=6` (5 to 8), or turn it off with `FIRE_CHANNEL=`. If it fires the wrong way round, reverse the channel on the radio.
 
 ### Arming
 
@@ -75,7 +85,7 @@ After a spawn the drone sits with its motors off until it sees input ("MOVE THE 
 
 With `dr_weapons 1` (the default) drones pick up and fire the normal Quake weapons. The gun hangs under the frame and fires along the aim: the camera direction in acro and level mode, the view in easy mode. Damage, armour, frags and respawns work as in normal deathmatch.
 
-- Shots hit a box `dr_hitbox` units across each way from the centre (default 12, at most 32), bigger than the drone's collision box. A 5" quad would otherwise be very hard to hit.
+- Shots hit a box `dr_hitbox` units across each way from the centre (default 12, at most 32), bigger than the drone's collision box. A 5" quad would otherwise be very hard to hit. Other pilots' drones are drawn at that box's size, so what you aim at is what you can hit, and moving drones leave a trail in their pilot's colour.
 - Resetting with weapons on self-destructs the drone (it counts as a suicide) and respawns it after the usual delay, so the reset switch is no free escape or heal. With `dr_weapons 0` it puts you straight back on a spawn point.
 - `dr_weapons 0` makes it a pure flying game: drones can't fire, and the HUD shows only the OSD.
 
@@ -118,6 +128,8 @@ Client (per pilot):
 | `dr_camstep` | 5 | degrees per `dr_camup` / `dr_camdown` step |
 | `cg_fov` | 115 | field of view (set in `fpv.cfg`) |
 | `dr_osd`, `dr_sticks` | 1, 1 | show the OSD and the stick overlay |
+| `dr_dronescale` | 0 | how big other drones are drawn; 0 = the size of their hitbox (about 2.7× with `dr_hitbox 12`) |
+| `dr_trail` | 1 | trail of puffs in the pilot's colour behind moving drones |
 | `dr_debug` | 0 | 1 prints the drone state to the console twice a second |
 
 Server:
@@ -126,7 +138,7 @@ Server:
 |---|---|---|
 | `g_drone` | 1 | 0 = normal Quake movement |
 | `dr_weapons` | 1 | drones carry and fire weapons |
-| `dr_hitbox` | 12 | half-size of the box shots hit (units, up to 32) |
+| `dr_hitbox` | 12 | half-size of the box shots hit (units, up to 32); clients draw other drones this big |
 | `dr_botdebug` | 0 | print the bot autopilot state |
 
 Server physics (also sent to clients for prediction):

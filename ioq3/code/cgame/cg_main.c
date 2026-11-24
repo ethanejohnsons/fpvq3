@@ -145,6 +145,8 @@ vmCvar_t	dr_osd;
 vmCvar_t	dr_sticks;
 vmCvar_t	dr_camstep;
 vmCvar_t	dr_debug;
+vmCvar_t	dr_dronescale;
+vmCvar_t	dr_trail;
 vmCvar_t	cg_zoomFov;
 vmCvar_t	cg_thirdPerson;
 vmCvar_t	cg_thirdPersonRange;
@@ -231,6 +233,8 @@ static cvarTable_t cvarTable[] = {
 	{ &dr_sticks, "dr_sticks", "1", CVAR_ARCHIVE },
 	{ &dr_camstep, "dr_camstep", "5", CVAR_ARCHIVE },
 	{ &dr_debug, "dr_debug", "0", 0 },
+	{ &dr_dronescale, "dr_dronescale", "0", CVAR_ARCHIVE },	// other drones' size; 0 = their hitbox
+	{ &dr_trail, "dr_trail", "1", CVAR_ARCHIVE },
 	{ &cg_viewsize, "cg_viewsize", "100", CVAR_ARCHIVE },
 	{ &cg_shadows, "cg_shadows", "1", CVAR_ARCHIVE  },
 	{ &cg_gibs, "cg_gibs", "1", CVAR_ARCHIVE  },

@@ -8,6 +8,8 @@
 #
 # Environment:
 #   CONTROLS=radio|gamepad|keyboard   control setup (default radio)
+#   CHANNELS=AETR  the radio's channel order (A roll, E pitch, T throttle, R yaw)
+#   FIRE_CHANNEL=5 radio channel (5-8) whose switch fires; empty for none
 #   BOTS=<n>      fill the game with n bots (BOT_SKILL=1-5, default 3)
 #   IOQ3=, IOQ3DED=, Q3BASE=          engine binaries and Quake III data folder
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -15,6 +17,8 @@ ENGINE="${IOQ3:-/opt/quake3/ioquake3}"
 DEDICATED="${IOQ3DED:-/opt/quake3/ioq3ded}"
 BASE="${Q3BASE:-$HOME/Games/quake3}"
 CONTROLS="${CONTROLS:-radio}"
+CHANNELS="${CHANNELS:-AETR}"
+FIRE_CHANNEL="${FIRE_CHANNEL-5}"
 
 MODE=solo
 case "$1" in
@@ -64,8 +68,43 @@ fi
 
 # SDL auto-maps the Jumper T-Pro as a gamepad with the throttle on a
 # half-range trigger. Remap all four channels onto full-range sticks
-# (mode 2); controls/radio.cfg binds those sticks. Override for other radios.
-export SDL_GAMECONTROLLERCONFIG="${SDL_GAMECONTROLLERCONFIG:-0300d60609120000544f000011010000,OpenTX Jumper TPRO Joystick,leftx:a3,lefty:a2,rightx:a0,righty:a1,platform:Linux,}"
+# (mode 2); controls/radio.cfg binds those sticks. CHANNELS is the radio's
+# channel order, one letter per channel from CH1: A(ileron) = roll,
+# E(levator) = pitch, T(hrottle), R(udder) = yaw. Set SDL_GAMECONTROLLERCONFIG
+# yourself for other radios (tools/calibrate.py).
+if [ -z "$SDL_GAMECONTROLLERCONFIG" ]; then
+	order=$(printf %s "$CHANNELS" | tr a-z A-Z)
+	case "$order" in
+		????) ;;
+		*) echo "CHANNELS=$CHANNELS: give the four letters A E T R in channel order, e.g. AETR or TAER" >&2; exit 1 ;;
+	esac
+	map=""
+	for letter in A E T R; do
+		rest="${order%%$letter*}"
+		if [ "$rest" = "$order" ] || printf %s "${order#*$letter}" | grep -q "$letter"; then
+			echo "CHANNELS=$CHANNELS: each of A, E, T and R must appear once" >&2
+			exit 1
+		fi
+		axis=${#rest}		# CH1 is axis 0
+		case $letter in
+			A) map="${map}rightx:a$axis," ;;
+			E) map="${map}righty:a$axis," ;;
+			T) map="${map}lefty:a$axis," ;;
+			R) map="${map}leftx:a$axis," ;;
+		esac
+	done
+	# A switch channel fires while it is in its upper half: SDL turns the
+	# axis into button A, which controls/radio.cfg binds to +attack.
+	case "$FIRE_CHANNEL" in
+		"") ;;
+		5|6|7|8) map="${map}a:a$((FIRE_CHANNEL - 1))," ;;
+		*) echo "FIRE_CHANNEL=$FIRE_CHANNEL: give a switch channel, 5 to 8 (or empty for none)" >&2; exit 1 ;;
+	esac
+	# The radio's SDL GUID (USB 1209:4f54 v0111) with the name checksum
+	# (bytes 3-4) zeroed: SDL then matches it whatever name the firmware
+	# reports ("TPRO", "TPro", OpenTX or EdgeTX).
+	export SDL_GAMECONTROLLERCONFIG="0300000009120000544f000011010000,Jumper T-Pro,${map}platform:Linux,"
+fi
 
 set -- "$@" \
 	+set r_maxpolys 4000 +set r_maxpolyverts 20000 \
